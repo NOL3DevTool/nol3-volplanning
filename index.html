@@ -2554,6 +2554,10 @@ th{color:#667085;font-weight:650}
 .onfloor-workspace:not(.towns-collapsed) .town-chip .town-chip-statuses{
   flex-wrap:wrap; overflow:visible; row-gap:4px; gap:4px; }
 .town-status-badge{ min-height:20px; }
+/* expanded Zone ID list: always AFTER the name / count / badges (the Towns-menu layout orders those 2-4) */
+.town-chip .town-zone-breakdown{ order:5; flex:0 0 calc(100% - 21px); margin:2px 0 0 21px; box-sizing:border-box; }
+.town-chip .town-chip-area{ color:var(--muted); font-weight:700; }
+.town-zone-origin{ color:var(--muted); font-weight:600; font-size:10px; }
 </style>
 </head>
 <body>
@@ -6076,6 +6080,63 @@ NOL3.pages.planning = function (root) {
       return `<div class="town-zone-breakdown">${zones.map(([zone, count]) => `<div class="town-zone-row"><span>${NOL3.escapeHTML(zone)}</span><strong>${count.toLocaleString()}</strong></div>`).join('')}</div>`;
     };
 
+    // Delivery Area cards: a card's Zone ID list must be EXACTLY the zones its own count is made of.
+    //   operational : the zones assigned to ONE Zone Settings area (a split piece)
+    //   splitparent : the zones assigned to ANY area (what a split-parent card counts)
+    //   plain       : every zone NOT assigned to an area (what a plain card counts)
+    // Same filters as the card counts: exceptions + business window + effective town.
+    const getCardZoneCounts = (town, kind, area) => {
+      const result = new Map();
+      const lm = (typeof NOL3.getPlanningLMInventoryV10 === "function" ? NOL3.getPlanningLMInventoryV10() : NOL3.lmInventory);
+      if (!lm || !Array.isArray(lm.filteredRows) || !Array.isArray(lm.headers)) return result;
+      const townIndex = findTownColumn(lm.headers);
+      const zoneIndex = findZoneIdColumn(lm.headers);
+      if (townIndex < 0 || zoneIndex < 0) return result;
+      const exceptionSet = getPlanningExceptionSet();
+      const businessMetrics = typeof getBusinessDayMetrics === 'function' ? getBusinessDayMetrics() : null;
+      const identityIndex = typeof getBusinessIdentityIndex === 'function' ? getBusinessIdentityIndex(lm.headers) : -1;
+      const dueIds = businessMetrics?.dueIds instanceof Set ? businessMetrics.dueIds : null;
+      const receivedIndex = businessMetrics?.receivedIndex ?? -1;
+      const hasBusinessWindow = dueIds && receivedIndex >= 0;
+      const zoneData = getZoneSettingsTownData(town);
+      const assignments = zoneData?.assignments && typeof zoneData.assignments === 'object' ? zoneData.assignments : {};
+      const definedAreas = new Set((Array.isArray(zoneData?.areas) ? zoneData.areas : []).map(String));
+      lm.filteredRows.forEach((row, index) => {
+        if (rowMatchesPlanningException(row, lm.headers, exceptionSet)) return;
+        if (hasBusinessWindow) {
+          const rawId = identityIndex >= 0 ? row[identityIndex] : '';
+          const id = normalizeIncomingKey(rawId) || `__row_${index}`;
+          if (!dueIds.has(id)) return;
+        }
+        const rowTown = kind === 'splitparent' ? parseTownValue(row[townIndex]) : resolveRowTown(row, townIndex, zoneIndex);
+        if (rowTown !== town) return;
+        const zone = String(row[zoneIndex] ?? '').replace(/^\uFEFF/, '').trim() || 'No Zone ID';
+        const areaName = String(assignments[zone] || '');
+        const inArea = !!areaName && definedAreas.has(areaName);
+        if (kind === 'operational') { if (areaName !== String(area)) return; }
+        else if (kind === 'splitparent') { if (!inArea) return; }
+        else if (inArea) return;
+        result.set(zone, (result.get(zone) || 0) + 1);
+      });
+      return result;
+    };
+    const renderCardZoneBreakdown = (town, kind, area) => {
+      const esc = NOL3.escapeHTML;
+      const zones = [...getCardZoneCounts(town, kind, area).entries()].sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+      if (!zones.length) return '<div class="town-zone-breakdown"><div class="town-zone-row"><span>No Zone ID data</span><strong>0</strong></div></div>';
+      const info = kind === 'operational' ? new Map() : getTownZoneBreakdown(town);
+      const zoneData = getZoneSettingsTownData(town);
+      const assignments = zoneData?.assignments && typeof zoneData.assignments === 'object' ? zoneData.assignments : {};
+      return `<div class="town-zone-breakdown">${zones.map(([zone, count]) => {
+        const meta = info.get(zone);
+        const draggable = kind === 'plain' && zone !== 'No Zone ID';
+        const originTag = meta?.reassigned ? ` <span class="town-zone-origin">from ${esc(meta.nativeTown)}</span>` : '';
+        const areaTag = kind === 'splitparent' && assignments[zone] ? ` <span class="town-zone-origin">→ ${esc(assignments[zone])}</span>` : '';
+        const undoBtn = meta?.reassigned ? `<button type="button" class="town-zone-undo" data-zone-undo="${esc(zone)}" title="Return to ${esc(meta.nativeTown)}">↩</button>` : '';
+        return `<div class="town-zone-row${draggable ? ' town-zone-draggable' : ''}" ${draggable ? `draggable="true" data-zone-id="${esc(zone)}" data-zone-native="${esc(meta?.nativeTown || town)}"` : ''}><span>${esc(zone)}${originTag}${areaTag}</span><strong>${count.toLocaleString()}</strong>${undoBtn}</div>`;
+      }).join('')}</div>`;
+    };
+
     const bindZoneRowDragging = (container) => {
       container?.querySelectorAll('.town-zone-draggable[draggable="true"]').forEach(row => {
         row.addEventListener('dragstart', event => {
@@ -8380,7 +8441,22 @@ NOL3.pages.planning = function (root) {
       const chipStatus = town => {
         const z = {received:0,delivering:0,delivered:0,hold:0};
         const s = _splitFor(town);
-        if (!s) return townStatusMetrics.get(town) || z;
+        if (!s) {
+          const base = townStatusMetrics.get(town) || z;
+          if (parseOperationalTownKey(town)) return base;
+          // Plain card of a town that has split pieces: only the part NOT in a piece.
+          const defs = getOperationalTownDefinitions(town);
+          if (!defs.length) return base;
+          const out = { received:Number(base.received||0), delivering:Number(base.delivering||0), delivered:Number(base.delivered||0), hold:Number(base.hold||0) };
+          defs.forEach(def => {
+            const m = townStatusMetrics.get(def.key) || z;
+            out.received = Math.max(0, out.received - Number(m.received || 0));
+            out.delivering = Math.max(0, out.delivering - Number(m.delivering || 0));
+            out.delivered = Math.max(0, out.delivered - Number(m.delivered || 0));
+            out.hold = Math.max(0, out.hold - Number(m.hold || 0));
+          });
+          return out;
+        }
         s.forEach(item => { z.received += item.received; z.delivering += item.delivering; z.delivered += item.delivered; z.hold += item.hold; });
         return z;
       };
@@ -8390,58 +8466,47 @@ NOL3.pages.planning = function (root) {
       // town, count the town only once (31, not 31 + 4). If the group contains
       // only Zone pieces, add those pieces because they represent disjoint
       // portions of the town. Different real towns are always summed normally.
+      // Group / Delivery Area totals add up EXACTLY what the cards show.
+      // A split-parent card already contains its own pieces, so pieces of the same
+      // town are not added twice; a plain card + its pieces add up to the real town.
       const getTownGroupUniqueVolume = group => {
         const byBaseTown = new Map();
         (Array.isArray(group?.towns) ? group.towns : []).forEach(townKey => {
           const operational = parseOperationalTownKey(townKey);
           const baseTown = operational ? operational.town : String(townKey || '');
           if (!baseTown) return;
-          if (!byBaseTown.has(baseTown)) byBaseTown.set(baseTown, { hasBase: false, pieceTotal: 0 });
+          if (!byBaseTown.has(baseTown)) byBaseTown.set(baseTown, { hasBase: false, parent: false, pieceTotal: 0 });
           const entry = byBaseTown.get(baseTown);
-          if (operational) {
-            entry.pieceTotal += Number(chipCount(townKey) || 0);
-          } else {
-            entry.hasBase = true;
-          }
+          if (operational) entry.pieceTotal += Number(chipCount(townKey) || 0);
+          else { entry.hasBase = true; entry.parent = !!_splitFor(townKey); }
         });
         let total = 0;
         byBaseTown.forEach((entry, baseTown) => {
-          if (entry.hasBase) {
-            // Use the untouched town snapshot so the base town remains the
-            // complete 31 even though its Zone-assigned piece is also present.
-            total += Number(rawTownCountsForGroups.get(baseTown) || 0);
-          } else {
-            total += entry.pieceTotal;
-          }
+          if (!entry.hasBase) total += entry.pieceTotal;
+          else if (entry.parent) total += Number(chipCount(baseTown) || 0);
+          else total += Number(chipCount(baseTown) || 0) + entry.pieceTotal;
         });
         return total;
       };
 
       const getTownGroupUniqueStatus = group => {
         const byBaseTown = new Map();
+        const zero = () => ({received:0,delivering:0,delivered:0,hold:0});
+        const add = (a, m) => { a.received += Number(m.received || 0); a.delivering += Number(m.delivering || 0); a.delivered += Number(m.delivered || 0); a.hold += Number(m.hold || 0); };
         (Array.isArray(group?.towns) ? group.towns : []).forEach(townKey => {
           const operational = parseOperationalTownKey(townKey);
           const baseTown = operational ? operational.town : String(townKey || '');
           if (!baseTown) return;
-          if (!byBaseTown.has(baseTown)) byBaseTown.set(baseTown, { hasBase:false, piece:{received:0,delivering:0,delivered:0,hold:0} });
+          if (!byBaseTown.has(baseTown)) byBaseTown.set(baseTown, { hasBase: false, parent: false, piece: zero() });
           const entry = byBaseTown.get(baseTown);
-          if (operational) {
-            const m = chipStatus(townKey);
-            entry.piece.received += Number(m.received || 0);
-            entry.piece.delivering += Number(m.delivering || 0);
-            entry.piece.delivered += Number(m.delivered || 0);
-            entry.piece.hold += Number(m.hold || 0);
-          } else {
-            entry.hasBase = true;
-          }
+          if (operational) add(entry.piece, chipStatus(townKey));
+          else { entry.hasBase = true; entry.parent = !!_splitFor(townKey); }
         });
-        const total = {received:0,delivering:0,delivered:0,hold:0};
+        const total = zero();
         byBaseTown.forEach((entry, baseTown) => {
-          const m = entry.hasBase ? (townStatusMetrics.get(baseTown) || {received:0,delivering:0,delivered:0,hold:0}) : entry.piece;
-          total.received += Number(m.received || 0);
-          total.delivering += Number(m.delivering || 0);
-          total.delivered += Number(m.delivered || 0);
-          total.hold += Number(m.hold || 0);
+          if (!entry.hasBase) add(total, entry.piece);
+          else if (entry.parent) add(total, chipStatus(baseTown));
+          else { add(total, chipStatus(baseTown)); add(total, entry.piece); }
         });
         return total;
       };
@@ -8489,7 +8554,7 @@ NOL3.pages.planning = function (root) {
                       return `
                         <div class="town-chip" draggable="true" data-town="${NOL3.escapeHTML(town)}" title="${NOL3.escapeHTML(operational.town)} — ${NOL3.escapeHTML(operational.area)}">
                           <button class="town-zone-toggle" type="button" aria-expanded="false" aria-label="Show Zone IDs for ${NOL3.escapeHTML(operational.town)} in ${NOL3.escapeHTML(operational.area)}">▸</button>
-                          <span class="town-chip-name">${NOL3.escapeHTML(operational.town)}</span>
+                          <span class="town-chip-name">${NOL3.escapeHTML(operational.town)} <span class="town-chip-area">· ${NOL3.escapeHTML(operational.area)}</span></span>
                           <span class="town-chip-statuses">
                             <span class="town-status-badge received" title="Received">R ${m.received.toLocaleString()}</span>
                             <span class="town-status-badge delivering" title="Delivering">D ${m.delivering.toLocaleString()}</span>
@@ -8525,16 +8590,17 @@ NOL3.pages.planning = function (root) {
                           <span class="town-chip-count">${totalSplit.toLocaleString()}</span>
                         </div>`;
                     }
+                    const pm = chipStatus(town);
                     return `
                       <div class="town-chip" draggable="true" data-town="${NOL3.escapeHTML(town)}" title="${NOL3.escapeHTML(town)}">
                         <button class="town-zone-toggle" type="button" aria-expanded="false" aria-label="Show Zone IDs for ${NOL3.escapeHTML(town)}">▸</button>
                         <span class="town-chip-name">${NOL3.escapeHTML(town)}</span>
                         <span class="town-chip-statuses">
-                          <span class="town-status-badge received" title="Received">R ${((townStatusMetrics.get(town) || {}).received || 0).toLocaleString()}</span>
-                          <span class="town-status-badge delivering" title="Delivering">D ${((townStatusMetrics.get(town) || {}).delivering || 0).toLocaleString()}</span>
-                          <span class="town-status-badge delivered" title="Delivered">DV ${((townStatusMetrics.get(town) || {}).delivered || 0).toLocaleString()}</span>
-                          <span class="town-status-badge hold" title="On Hold">H ${((townStatusMetrics.get(town) || {}).hold || 0).toLocaleString()}</span>
-                          <span class="town-status-badge success-rate" title="Success Rate">SR ${formatSuccessRate(townStatusMetrics.get(town) || {received:0,delivering:0,delivered:0,hold:0})}%</span>
+                          <span class="town-status-badge received" title="Received">R ${(pm.received || 0).toLocaleString()}</span>
+                          <span class="town-status-badge delivering" title="Delivering">D ${(pm.delivering || 0).toLocaleString()}</span>
+                          <span class="town-status-badge delivered" title="Delivered">DV ${(pm.delivered || 0).toLocaleString()}</span>
+                          <span class="town-status-badge hold" title="On Hold">H ${(pm.hold || 0).toLocaleString()}</span>
+                          <span class="town-status-badge success-rate" title="Success Rate">SR ${formatSuccessRate(pm)}%</span>
                         </span>
                         <span class="town-chip-count">${(townCounts.get(town) || 0).toLocaleString()}</span>
                       </div>`;
@@ -8631,7 +8697,7 @@ NOL3.pages.planning = function (root) {
           if (!wasOpen && chip) {
             chip.classList.add('zone-open');
             const parsedChipTown = parseOperationalTownKey(chip.dataset.town || '');
-            chip.insertAdjacentHTML('beforeend', parsedChipTown ? renderOperationalTownZoneBreakdown(parsedChipTown.town, parsedChipTown.area) : renderTownZoneBreakdown(chip.dataset.town || ''));
+            chip.insertAdjacentHTML('beforeend', parsedChipTown ? renderCardZoneBreakdown(parsedChipTown.town, 'operational', parsedChipTown.area) : renderCardZoneBreakdown(chip.dataset.town || '', chip.classList.contains('town-chip-split-parent') ? 'splitparent' : 'plain'));
             if (!parsedChipTown) bindZoneRowDragging(chip); // only plain (non-split) towns support zone-transfer dragging
             button.setAttribute('aria-expanded','true');
             button.textContent = '▾';
