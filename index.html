@@ -2541,6 +2541,20 @@ th{color:#667085;font-weight:650}
 .clear-progress-modal.error .clear-progress-bar{background:#b42318}
 </style>
 
+<style id="nol3-delivery-area-fix">
+/* Delivery Areas: a town card must never be squeezed below its content.
+   The town list is a scrolling flex column and the cards only had min-height,
+   so they shrank to one row and the R/D/DV/H/SR badges spilled over the next card. */
+.town-group-dropzone > .town-chip,
+.delivery-area-dropzone > .town-chip,
+.town-chip{ flex:0 0 auto; height:auto; min-height:38px; }
+.town-group-dropzone{ max-height:320px; padding-right:7px; }
+/* second row: let the badges wrap instead of being clipped on narrow columns */
+.onfloor-workspace:not(.towns-collapsed) .town-chip{ row-gap:6px; padding-bottom:8px; }
+.onfloor-workspace:not(.towns-collapsed) .town-chip .town-chip-statuses{
+  flex-wrap:wrap; overflow:visible; row-gap:4px; gap:4px; }
+.town-status-badge{ min-height:20px; }
+</style>
 </head>
 <body>
 <div class="app-shell">
@@ -3141,7 +3155,7 @@ const NOL3_PRESET_HUBS = NOL3_HUB_CATALOG.map(h => h.name);
             <button class="inventory-clear-btn" id="clearLMBtn" type="button" disabled>Clear Uploaded File</button>
 
             <div class="lm-filter-status" id="lmFilterStatus">
-              Selected Hub filter: <strong>Not selected</strong>
+              Station filter: <strong>Not selected</strong>
             </div>
           </section>
 
@@ -3575,7 +3589,7 @@ const NOL3_PRESET_HUBS = NOL3_HUB_CATALOG.map(h => h.name);
 
       const hub = (NOL3.getState && NOL3.getState().selectedHub) || "";
       if (!hub) {
-        status.innerHTML = `Selected Hub filter: <strong>Not selected</strong>`;
+        status.innerHTML = `Station filter: <strong>Not selected</strong>`;
         return;
       }
 
@@ -3584,7 +3598,7 @@ const NOL3_PRESET_HUBS = NOL3_HUB_CATALOG.map(h => h.name);
       NOL3.lmInventory.filteredRows = filteredRows;
 
       status.innerHTML =
-        `Selected Hub filter: <strong>${escapeHTML(hub)}</strong> · ` +
+        `Station filter: <strong>${escapeHTML(hub)}</strong> · ` +
         `Current Station must be ${escapeHTML(hub)} · ` +
         `${filteredRows.length.toLocaleString()} matching order(s)`;
 
@@ -4639,8 +4653,8 @@ const NOL3_PRESET_HUBS = NOL3_HUB_CATALOG.map(h => h.name);
         const filteredRows = filterLMRows(rows, hub);
         NOL3.lmInventory.filteredRows = filteredRows;
         status.innerHTML = hub
-          ? `Selected Hub filter: <strong>${escapeHTML(hub)}</strong> · Current Station must be ${escapeHTML(hub)} · ${filteredRows.length.toLocaleString()} matching order(s)`
-          : `Selected Hub filter: <strong>Not selected</strong>`;
+          ? `Station filter: <strong>${escapeHTML(hub)}</strong> · Current Station must be ${escapeHTML(hub)} · ${filteredRows.length.toLocaleString()} matching order(s)`
+          : `Station filter: <strong>Not selected</strong>`;
       }
     });
 
@@ -10687,14 +10701,14 @@ NOL3.pages.riders = function (root) {
 
     if (existingTitle && existingSubtitle && existingDateInput && existingControls) {
       existingTitle.textContent = pageNames[state.currentPage] || state.currentPage || "Planning";
-      existingSubtitle.textContent = state.selectedHub ? `Selected hub: ${state.selectedHub}` : "No hub selected";
+      existingSubtitle.textContent = "";
       return;
     }
 
     root.innerHTML = `
       <div class="topbar-left">
         <div class="page-title">${pageNames[state.currentPage] || "Planning"}</div>
-        <div class="subtle">${state.selectedHub ? `Selected hub: ${state.selectedHub}` : "No hub selected"}</div>
+        <div class="subtle"></div>
       </div>
       <div class="topbar-business-controls" id="topbarBusinessControls">
         <label class="topbar-business-field business-date-readonly">
@@ -11444,7 +11458,7 @@ NOL3.pages.riders = function (root) {
     if (type === "lm") {
       NOL3.lmInventory = { files: [], rows: [], filteredRows: [] };
       const lmStatus = document.getElementById("lmFilterStatus");
-      if (lmStatus) lmStatus.innerHTML = `Selected Hub filter: <strong>Not selected</strong>`;
+      if (lmStatus) lmStatus.innerHTML = `Station filter: <strong>Not selected</strong>`;
       window.dispatchEvent(new CustomEvent("lminventoryfiltered", { detail: { hub: "", totalRows: 0, filteredRows: [] } }));
     }
     if (type === "incoming") NOL3.incomingInventory = null;
@@ -14613,7 +14627,7 @@ NOL3.clearRiderData = async function () {
         clearPending(kind);
         setBusy(id,false);
       });
-      setStatus('parcelInboundSpxSyncStatus','SPX Bridge disconnected. Reload the extension, then refresh BADOC.','error');
+      setStatus('parcelInboundSpxSyncStatus','SPX Bridge disconnected. Reload the extension, then refresh this page.','error');
       return;
     }
 
@@ -14807,6 +14821,58 @@ NOL3.clearRiderData = async function () {
       NOL3.readLineHaulInventory([new File([csvText],`spx_inbound_to_list_${stamp()}.csv`,{type:'text/csv',lastModified:Date.now()})]);
     });
   };
+})();
+</script>
+
+<script id="nol3-bridge-install-banner">
+/* Shows a download prompt on the Inventory Upload page while the SPX Bridge extension is not connected. */
+(function(){
+  'use strict';
+  const REPO_URL='https://github.com/xenerycenery1-pixel/nol3-volplanning-bridge';
+  const ZIP_URL=REPO_URL+'/archive/HEAD.zip';   // always the repo's default branch
+  const BRIDGE_SOURCE='VOLPLAN_BRIDGE';
+  const startedAt=Date.now();
+  let wasReady=false;
+
+  const st=document.createElement('style');
+  st.textContent=`
+  .nol3-bridge-banner{margin:10px 0 12px;padding:12px 14px;border:1px solid #fcd9a8;background:#fffaf0;border-radius:10px;color:#7a4a06;font-size:12px;line-height:1.45}
+  .nol3-bridge-banner.is-lost{border-color:#fecaca;background:#fef2f2;color:#991b1b}
+  .nol3-bridge-banner strong{display:block;font-size:12.5px;margin-bottom:2px}
+  .nol3-bridge-banner .nb-actions{display:flex;flex-wrap:wrap;gap:8px;margin:9px 0 6px}
+  .nol3-bridge-banner a.nb-btn{display:inline-flex;align-items:center;gap:6px;padding:7px 12px;border-radius:8px;border:1px solid #d0d5dd;background:#fff;color:#344054;font-size:11px;font-weight:800;text-decoration:none}
+  .nol3-bridge-banner a.nb-btn.primary{background:#2563eb;border-color:#2563eb;color:#fff}
+  .nol3-bridge-banner a.nb-btn:hover{filter:brightness(.96)}
+  .nol3-bridge-banner ol{margin:4px 0 0;padding-left:18px;font-size:11px;color:inherit;opacity:.9}
+  .nol3-bridge-banner code{background:rgba(0,0,0,.06);padding:0 4px;border-radius:4px}`;
+  document.head.appendChild(st);
+
+  window.addEventListener('message',e=>{
+    if(e.source!==window)return;
+    const d=e.data||{};
+    if(d.source===BRIDGE_SOURCE && d.type==='VOLPLAN_BRIDGE_READY'){wasReady=true;}
+  });
+
+  function render(){
+    const controls=document.getElementById('inventorySpxSyncControls');
+    let b=document.getElementById('nol3BridgeInstallBanner');
+    const connected=!!window.__badocPlanningSpxBridgeReady;
+    const needs=controls && !connected && (wasReady || Date.now()-startedAt>4000);
+    if(!needs){ if(b)b.remove(); return; }
+    const state=wasReady?'lost':'missing';
+    if(b && b.dataset.state===state)return;
+    if(b)b.remove();
+    b=document.createElement('div');
+    b.id='nol3BridgeInstallBanner'; b.dataset.state=state;
+    b.className='nol3-bridge-banner'+(wasReady?' is-lost':'');
+    b.innerHTML=(wasReady
+      ? `<strong>SPX Bridge disconnected</strong>The extension was reloaded or turned off. Open <code>chrome://extensions</code>, reload <b>NOL3 VOLPLANNING BRIDGE</b>, then refresh this page (F5).`
+      : `<strong>SPX Bridge is not connected</strong>Install the NOL3 VolPlanning Bridge extension to sync from the SPX Portal, then refresh this page (F5).`)
+      +`<div class="nb-actions"><a class="nb-btn primary" href="${ZIP_URL}" rel="noopener">⬇ Download extension (.zip)</a><a class="nb-btn" href="${REPO_URL}" target="_blank" rel="noopener">View on GitHub</a></div>`
+      +(wasReady?'':`<ol><li>Unzip the download.</li><li>Open <code>chrome://extensions</code> and turn on <b>Developer mode</b>.</li><li>Click <b>Load unpacked</b> and select the unzipped folder (the one containing <code>manifest.json</code>).</li><li>Stay logged in to the SPX Portal, then refresh this page.</li></ol>`);
+    controls.insertBefore(b, controls.children[1]||null);
+  }
+  setInterval(render,1000);
 })();
 </script>
 
