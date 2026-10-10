@@ -6201,77 +6201,186 @@ NOL3.pages.planning = function (root) {
     };
 
     let zoneClusterApplyRunning = false;
-    // A rule splits ONLY the matching Zone ID's orders out of a town — it does
-    // NOT move the whole town. This reuses the same per-town Zone Settings
-    // splitting data (areas/assignments) that the Zone Splitting tab writes to
-    // by hand, so a town with zones under several initials (e.g. "A-" and "E-")
-    // ends up with one exact-count card per matched zone, and the rest of the
-    // town's volume stays put, separate and uncombined.
+    // ---- Zone Clustering = automatic filtering. It RECONCILES the layout with the rules:
+    //   * every town+Zone ID matching a rule is split out and placed in the rule's Delivery
+    //     Area (created if missing) -- nothing to drag by hand;
+    //   * anything clustering made earlier that no rule asks for any more (rule deleted /
+    //     edited / Delivery Area removed) is undone: split removed, town taken out of the
+    //     Delivery Area, and an emptied auto-created Delivery Area removed.
+    // Splits made by clustering are remembered so manual Zone Splitting is never touched.
+    const ZONE_CLUSTER_APPLIED_KEY = 'nol3_zone_cluster_applied_v1';
+    const clusterHubKey = () => String((NOL3.getState && NOL3.getState().selectedHub) || '').trim() || '__NO_HUB__';
+    const readClusterApplied = () => {
+      try {
+        const raw = NOL3Storage.get(ZONE_CLUSTER_APPLIED_KEY);
+        const entry = (raw ? JSON.parse(raw) : {})[clusterHubKey()] || {};
+        return { entries: Array.isArray(entry.entries) ? entry.entries : [], areas: Array.isArray(entry.areas) ? entry.areas : [] };
+      } catch (_) { return { entries: [], areas: [] }; }
+    };
+    const writeClusterApplied = (value) => {
+      try {
+        const raw = NOL3Storage.get(ZONE_CLUSTER_APPLIED_KEY);
+        const store = raw ? JSON.parse(raw) : {};
+        store[clusterHubKey()] = value;
+        NOL3Storage.set(ZONE_CLUSTER_APPLIED_KEY, JSON.stringify(store));
+      } catch (_) {}
+    };
+    const sameAreaName = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+    // True when a split's area name is really a Delivery Area (a cluster piece) -- its town
+    // keeps its plain name; only hand-made Zone Splitting areas need a name suffix.
+    const isClusterAreaName = (area) => {
+      const a = String(area || '').trim().toLowerCase();
+      if (!a) return false;
+      if ((NOL3.deliveryAreas || []).some(d => String(d.title || '').trim().toLowerCase() === a)) return true;
+      return (NOL3.getZoneClusterRules ? NOL3.getZoneClusterRules() : []).some(r => String(r.targetArea || '').trim().toLowerCase() === a);
+    };
+
+    // A rule splits ONLY the matching Zone ID's orders out of a town -- never the whole town.
     const applyZoneClusterRules = (options = {}) => {
       const statusEl = document.getElementById('zoneClusterStatus');
       const setStatus = text => { if (statusEl && !options.silent) statusEl.textContent = text; };
-      if (zoneClusterApplyRunning) return { moved: 0 }; // re-entrancy guard
-      const rules = NOL3.getZoneClusterRules();
-      if (!rules.length) { setStatus('No rules to apply.'); return { moved: 0 }; }
-      if (!NOL3.lmInventory?.filteredRows?.length) { setStatus('Upload LM Inventory first.'); return { moved: 0 }; }
-      const zoneColIndex = findZoneIdColumn(NOL3.lmInventory.headers || []);
-      if (zoneColIndex < 0) { setStatus('No Zone ID column found.'); return { moved: 0 }; }
-
+      if (zoneClusterApplyRunning) return { moved: 0, removed: 0 };
       zoneClusterApplyRunning = true;
       try {
-        const townZones = getAllTownZoneSetsForClustering(); // town -> Set(raw Zone ID)
+        const rules = NOL3.getZoneClusterRules().filter(r => String(r?.value || '').trim() && String(r?.targetArea || '').trim());
+        const desiredFor = zone => { for (const r of rules) if (NOL3.matchZoneClusterRule(r, zone)) return String(r.targetArea).trim(); return ''; };
         const { store, hub, data } = getZoneSettingsHubStore();
-        const touchedKeys = new Set(); // "town::areaTitle" pairs actually created/changed this pass
+        const applied = readClusterApplied();
+        let settingsChanged = false;
 
-        townZones.forEach((zones, town) => {
-          zones.forEach(zone => {
-            for (const rule of rules) {
-              if (!NOL3.matchZoneClusterRule(rule, zone)) continue;
-              const areaTitle = String(rule.targetArea || '').trim();
-              if (!areaTitle) break;
-              data[town] = data[town] && typeof data[town] === 'object' ? data[town] : { areas: [], assignments: {} };
-              data[town].areas = Array.isArray(data[town].areas) ? data[town].areas : [];
-              data[town].assignments = data[town].assignments && typeof data[town].assignments === 'object' ? data[town].assignments : {};
-              if (!data[town].areas.some(a => String(a).toLowerCase() === areaTitle.toLowerCase())) data[town].areas.push(areaTitle);
-              if (data[town].assignments[zone] !== areaTitle) {
-                data[town].assignments[zone] = areaTitle;
-                touchedKeys.add(`${town}::${areaTitle}`);
+        const removeSplit = (town, zone, area) => {
+          const entry = data[town];
+          const asg = entry && typeof entry === 'object' && entry.assignments && typeof entry.assignments === 'object' ? entry.assignments : null;
+          if (!asg || !sameAreaName(asg[zone], area)) return false;
+          const stored = String(asg[zone]);
+          delete asg[zone];
+          if (!Object.values(asg).some(a => sameAreaName(a, stored)) && Array.isArray(entry.areas)) entry.areas = entry.areas.filter(a => !sameAreaName(a, stored));
+          settingsChanged = true;
+          return true;
+        };
+
+        // 1) UNDO: splits clustering made that no rule asks for any more
+        let removed = 0;
+        const removedAreaTitles = new Set((options.removedTargets || []).map(t => String(t).trim().toLowerCase()).filter(Boolean));
+        const removedKeys = [];
+        const kept = [];
+        applied.entries.forEach(e => {
+          if (sameAreaName(desiredFor(e.zone), e.area)) { kept.push(e); return; }
+          removedAreaTitles.add(String(e.area).trim().toLowerCase());
+          if (removeSplit(e.town, e.zone, e.area)) { removed++; removedKeys.push({ town: e.town, area: e.area }); }
+        });
+        // splits made by an older version (not remembered): only on an explicit user action
+        if (options.legacy) {
+          const titles = new Set((NOL3.deliveryAreas || []).map(a => String(a.title || '').trim().toLowerCase()));
+          rules.forEach(r => titles.add(String(r.targetArea).trim().toLowerCase()));
+          removedAreaTitles.forEach(t => titles.add(t));
+          Object.keys(data).forEach(town => {
+            const asg = data[town] && data[town].assignments;
+            if (!asg || typeof asg !== 'object') return;
+            Object.keys(asg).forEach(zone => {
+              const area = String(asg[zone] || '');
+              if (!titles.has(area.trim().toLowerCase())) return;
+              if (sameAreaName(desiredFor(zone), area)) return;
+              removedAreaTitles.add(area.trim().toLowerCase());
+              if (removeSplit(town, zone, area)) { removed++; removedKeys.push({ town, area }); }
+            });
+          });
+        }
+
+        // 2) SPLIT: every town + Zone ID matching a rule
+        let splitsApplied = 0;
+        const targets = new Map(); // "town\u0001area" -> { town, area }
+        const haveInventory = !!NOL3.lmInventory?.filteredRows?.length && findZoneIdColumn(NOL3.lmInventory.headers || []) >= 0;
+        if (rules.length && haveInventory) {
+          getAllTownZoneSetsForClustering().forEach((zones, town) => {
+            zones.forEach(zone => {
+              const areaTitle = desiredFor(zone);
+              if (!areaTitle) return;
+              const entry = data[town] && typeof data[town] === 'object' ? data[town] : { areas: [], assignments: {} };
+              entry.areas = Array.isArray(entry.areas) ? entry.areas : [];
+              entry.assignments = entry.assignments && typeof entry.assignments === 'object' ? entry.assignments : {};
+              const current = String(entry.assignments[zone] || '');
+              if (current && !sameAreaName(current, areaTitle)) return;          // a hand-made split stays as it is
+              if (!current) {
+                if (!entry.areas.some(a => sameAreaName(a, areaTitle))) entry.areas.push(areaTitle);
+                entry.assignments[zone] = areaTitle;
+                data[town] = entry;
+                settingsChanged = true; splitsApplied++;
               }
-              break; // first matching rule wins for THIS zone — the rest of the town's zones are untouched
-            }
+              const area = String(entry.assignments[zone]);
+              if (!kept.some(e => e.town === town && e.zone === zone && sameAreaName(e.area, area))) kept.push({ town, zone, area });
+              targets.set(town + '\u0001' + area.toLowerCase(), { town, area });
+            });
+          });
+        }
+        if (settingsChanged) { store[hub] = data; saveZoneSettingsStore(store); }
+
+        // 3) PLACE: matching pieces that are not inside any Delivery Area yet
+        const placedKeys = new Set();
+        NOL3.deliveryAreas.forEach(a => ensureAreaGroups(a).forEach(g => g.towns.forEach(t => placedKeys.add(t))));
+        let placed = 0, movedOrders = 0, layoutChanged = false;
+        const createdTitles = new Set(applied.areas);
+        targets.forEach(({ town, area }) => {
+          const opKey = makeOperationalTownKey(town, area);
+          if (placedKeys.has(opKey)) return;
+          const count = getOperationalTownStats(town, area).count;
+          if (!(count > 0)) return;
+          const existed = NOL3.deliveryAreas.some(a => sameAreaName(a.title, area));
+          const resolved = findOrCreateDeliveryAreaByTitle(area);
+          if (!resolved) return;
+          if (!existed) createdTitles.add(area.toLowerCase());
+          resolved.group.towns.push(opKey);
+          resolved.area.towns = ensureAreaGroups(resolved.area).flatMap(g => g.towns);
+          placedKeys.add(opKey); placed++; movedOrders += count; layoutChanged = true;
+        });
+
+        // 4) UNPLACE towns whose split was undone
+        removedKeys.forEach(({ town, area }) => {
+          // the piece key is town + area, shared by ALL of that town's zones in the area:
+          // keep it in place while any matching zone is still split into that area
+          const asg = data[town] && data[town].assignments;
+          if (asg && Object.values(asg).some(a => sameAreaName(a, area))) return;
+          const key = makeOperationalTownKey(town, area);
+          NOL3.deliveryAreas.forEach(a => {
+            const groups = ensureAreaGroups(a);
+            const before = groups.reduce((n, g) => n + g.towns.length, 0);
+            groups.forEach(g => { g.towns = g.towns.filter(t => t !== key); });
+            a.towns = groups.flatMap(g => g.towns);
+            if (a.towns.length !== before) layoutChanged = true;
           });
         });
 
-        store[hub] = data;
-        const changed = touchedKeys.size > 0;
-        if (changed) saveZoneSettingsStore(store);
-
-        // Place each newly-split piece straight into its matching Delivery Area,
-        // carrying only that zone's exact count — never the whole town's total.
-        let movedOrders = 0;
-        touchedKeys.forEach(key => {
-          const sep = key.lastIndexOf('::');
-          const town = key.slice(0, sep), areaTitle = key.slice(sep + 2);
-          const opKey = makeOperationalTownKey(town, areaTitle);
-          movedOrders += getOperationalTownStats(town, areaTitle).count;
-          const resolved = findOrCreateDeliveryAreaByTitle(areaTitle);
-          if (!resolved) return;
-          NOL3.deliveryAreas.forEach(a => ensureAreaGroups(a).forEach(g => { g.towns = g.towns.filter(t => t !== opKey); }));
-          resolved.group.towns.push(opKey);
-          resolved.area.towns = ensureAreaGroups(resolved.area).flatMap(g => g.towns);
+        // 5) a Delivery Area that clustering made and that is now empty and unused goes away too
+        const stillTargeted = new Set(rules.map(r => String(r.targetArea).trim().toLowerCase()));
+        let areasRemoved = 0;
+        const candidates = new Set([...removedAreaTitles, ...createdTitles]);
+        NOL3.deliveryAreas = NOL3.deliveryAreas.filter(a => {
+          const t = String(a.title || '').trim().toLowerCase();
+          if (!candidates.has(t) || stillTargeted.has(t)) return true;
+          const groups = ensureAreaGroups(a);
+          const empty = groups.every(g => !g.towns.length && !(Array.isArray(g.assignedRiders) && g.assignedRiders.length));
+          if (!empty) return true;
+          areasRemoved++; layoutChanged = true; createdTitles.delete(t);
+          return false;
         });
 
-        if (changed) {
-          savePlanningLayout();
+        writeClusterApplied({ entries: kept, areas: [...createdTitles].filter(t => stillTargeted.has(t)) });
+
+        if (layoutChanged) savePlanningLayout();
+        if (settingsChanged || layoutChanged) {
           renderDeliveryAreas();
           renderOnFloorTowns();
           renderZoneSettings();
           notifyZoneSettingsChanged();
         }
-        setStatus(changed
-          ? `${touchedKeys.size} Zone ID split${touchedKeys.size === 1 ? '' : 's'} applied · ${movedOrders.toLocaleString()} orders placed — the rest of each town's volume is untouched.`
-          : 'No unmatched Zone IDs to split — everything matching the rules is already placed.');
-        return { moved: movedOrders };
+        const parts = [];
+        if (splitsApplied) parts.push(`${splitsApplied} Zone ID split${splitsApplied === 1 ? '' : 's'} applied`);
+        if (placed) parts.push(`${placed} town${placed === 1 ? '' : 's'} placed in their Delivery Area · ${movedOrders.toLocaleString()} orders`);
+        if (removed) parts.push(`${removed} split${removed === 1 ? '' : 's'} cleared (no longer matched by any rule)`);
+        if (areasRemoved) parts.push(`${areasRemoved} empty Delivery Area${areasRemoved === 1 ? '' : 's'} removed`);
+        setStatus(parts.length ? parts.join(' · ') + '.'
+          : (!rules.length ? 'No rules yet.' : (haveInventory ? 'Up to date — every town matching the rules is already inside its Delivery Area.' : 'Upload LM Inventory first.')));
+        return { moved: movedOrders, removed };
       } finally {
         zoneClusterApplyRunning = false;
       }
@@ -6296,8 +6405,10 @@ NOL3.pages.planning = function (root) {
         </div>`).join('');
       list.querySelectorAll('[data-delete-rule]').forEach(btn => btn.addEventListener('click', () => {
         if (editingZoneClusterRuleId === btn.dataset.deleteRule) cancelZoneClusterEdit();
+        const gone = NOL3.getZoneClusterRules().find(r => r.id === btn.dataset.deleteRule);
         NOL3.saveZoneClusterRules(NOL3.getZoneClusterRules().filter(r => r.id !== btn.dataset.deleteRule));
         renderZoneClusterRules();
+        applyZoneClusterRules({ silent: false, legacy: true, removedTargets: gone ? [gone.targetArea] : [] });
       }));
       list.querySelectorAll('[data-edit-rule]').forEach(btn => btn.addEventListener('click', () => startZoneClusterEdit(btn.dataset.editRule)));
     };
@@ -6343,17 +6454,18 @@ NOL3.pages.planning = function (root) {
       const targetArea = String(targetInput?.value || '').trim();
       if (!value || !targetArea) { (!value ? valueInput : targetInput)?.focus(); return; }
       const rules = NOL3.getZoneClusterRules();
+      let editedOldTarget = '';
       if (editingZoneClusterRuleId) {
         const existing = rules.find(r => r.id === editingZoneClusterRuleId);
-        if (existing) { existing.condition = condition; existing.value = value; existing.targetArea = targetArea; }
+        if (existing) { editedOldTarget = existing.targetArea || ''; existing.condition = condition; existing.value = value; existing.targetArea = targetArea; }
       } else {
         rules.push({ id: `rule-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, condition, value, targetArea });
       }
       NOL3.saveZoneClusterRules(rules);
       cancelZoneClusterEdit();
-      applyZoneClusterRules({ silent: false });
+      applyZoneClusterRules({ silent: false, legacy: true, removedTargets: editedOldTarget ? [editedOldTarget] : [] });
     });
-    document.getElementById('zoneClusterApplyNow')?.addEventListener('click', () => applyZoneClusterRules({ silent: false }));
+    document.getElementById('zoneClusterApplyNow')?.addEventListener('click', () => applyZoneClusterRules({ silent: false, legacy: true }));
 
     // ---- Bulk setup: detect every Zone ID prefix (e.g. "A-", "B-") and let the
     // planner assign each one to a Delivery Area in a single pass. ----
@@ -6419,7 +6531,7 @@ NOL3.pages.planning = function (root) {
       if (!added && !updated) return;
       NOL3.saveZoneClusterRules(rules);
       renderZoneClusterRules();
-      const result = applyZoneClusterRules({ silent: true });
+      const result = applyZoneClusterRules({ silent: true, legacy: true });
       const statusEl = document.getElementById('zoneClusterStatus');
       if (statusEl) statusEl.textContent = `${added} rule${added === 1 ? '' : 's'} created, ${updated} updated · ${result.moved} town${result.moved === 1 ? '' : 's'} moved.`;
     });
@@ -6983,7 +7095,7 @@ NOL3.pages.planning = function (root) {
         // zone-scoped key (town + Zone ID). Dragging / moving it places just those orders.
         const isZonePiece = !!zoneContext && zoneContext !== 'No Zone ID' && !item.splitArea;
         const cardKey = isZonePiece ? makeOperationalTownKey(item.baseTown, zoneContext) : item.town;
-        const areaSuffix = item.splitArea ? `<span class="town-area-label"> · ${NOL3.escapeHTML(item.splitArea)}</span>` : '';
+        const areaSuffix = item.splitArea && !isClusterAreaName(item.splitArea) ? `<span class="town-area-label"> · ${NOL3.escapeHTML(item.splitArea)}</span>` : '';
         const zoneIdLine = zoneContext
           ? ''
           : (item.splitArea
@@ -7465,6 +7577,7 @@ NOL3.pages.planning = function (root) {
 
       NOL3.deliveryAreas = NOL3.deliveryAreas.filter(area => area.id !== id);
       savePlanningLayout();
+      try { NOL3.applyZoneClusterRules?.({ silent: true, legacy: true, removedTargets: removedTitle ? [removedTitle] : [] }); } catch (_) {}
       closeRemoveDeliveryAreaModal();
       renderDeliveryAreas();
       renderOnFloorTowns();
@@ -8592,7 +8705,7 @@ NOL3.pages.planning = function (root) {
                       return `
                         <div class="town-chip" draggable="true" data-town="${NOL3.escapeHTML(town)}" title="${NOL3.escapeHTML(operational.town)} — ${NOL3.escapeHTML(operational.area)}">
                           <button class="town-zone-toggle" type="button" aria-expanded="false" aria-label="Show Zone IDs for ${NOL3.escapeHTML(operational.town)} in ${NOL3.escapeHTML(operational.area)}">▸</button>
-                          <span class="town-chip-name">${NOL3.escapeHTML(operational.town)} <span class="town-chip-area">· ${NOL3.escapeHTML(operational.area)}</span></span>
+                          <span class="town-chip-name">${NOL3.escapeHTML(operational.town)}${isClusterAreaName(operational.area) ? '' : ` <span class="town-chip-area">· ${NOL3.escapeHTML(operational.area)}</span>`}</span>
                           <span class="town-chip-statuses">
                             <span class="town-status-badge received" title="Received">R ${m.received.toLocaleString()}</span>
                             <span class="town-status-badge delivering" title="Delivering">D ${m.delivering.toLocaleString()}</span>
