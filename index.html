@@ -2558,6 +2558,7 @@ th{color:#667085;font-weight:650}
 .town-chip .town-zone-breakdown{ order:5; flex:0 0 calc(100% - 21px); margin:2px 0 0 21px; box-sizing:border-box; }
 .town-chip .town-chip-area{ color:var(--muted); font-weight:700; }
 .town-zone-origin{ color:var(--muted); font-weight:600; font-size:10px; }
+.town-area-label{ color:var(--muted); font-weight:700; }
 </style>
 </head>
 <body>
@@ -6794,7 +6795,7 @@ NOL3.pages.planning = function (root) {
             const stats = getOperationalTownStats(town, def.area);
             splitSum += stats.count;
             if (assignedTowns.has(def.key)) return;
-            if (stats.count > 0) grouped.set(def.key, { town: def.key, displayTown: def.area, baseTown: town, splitArea: def.area, count: stats.count, incomingCount: 0 });
+            if (stats.count > 0) grouped.set(def.key, { town: def.key, displayTown: town, baseTown: town, splitArea: def.area, count: stats.count, incomingCount: 0 });
           });
           // A town split only PARTLY (e.g. one Zone ID initial matched a cluster
           // rule, others didn't) keeps its own card for the remaining, still-
@@ -6871,7 +6872,7 @@ NOL3.pages.planning = function (root) {
             if (splitCount > 0 && !assignedTowns.has(def.key)) {
               townDisplay.set(def.key, {
                 town: def.key,
-                displayTown: def.area,
+                displayTown: baseTown,
                 baseTown,
                 splitArea: def.area,
                 count: splitCount,
@@ -6978,6 +6979,11 @@ NOL3.pages.planning = function (root) {
       // into one specific zone group's row). In "By Town" mode, or for a card's
       // own un-grouped total, both still render normally.
       const buildTownCardHTML = (item, countOverride, zoneContext) => {
+        // By Zone: a plain card under Zone ID Z carries ONLY Z's orders, so it gets its own
+        // zone-scoped key (town + Zone ID). Dragging / moving it places just those orders.
+        const isZonePiece = !!zoneContext && zoneContext !== 'No Zone ID' && !item.splitArea;
+        const cardKey = isZonePiece ? makeOperationalTownKey(item.baseTown, zoneContext) : item.town;
+        const areaSuffix = item.splitArea ? `<span class="town-area-label"> · ${NOL3.escapeHTML(item.splitArea)}</span>` : '';
         const zoneIdLine = zoneContext
           ? ''
           : (item.splitArea
@@ -6994,12 +7000,12 @@ NOL3.pages.planning = function (root) {
           ? `${NOL3.escapeHTML(item.displayTown)} — ${NOL3.escapeHTML(zoneContext)}`
           : `${NOL3.escapeHTML(item.displayTown)}${zoneIdLine ? ' — ' + NOL3.escapeHTML(zoneIdLine) : ''}`;
         return `
-          <div class="town-card${NOL3._selectedTowns.has(item.town) ? ' selected' : ''}" draggable="true" data-town="${NOL3.escapeHTML(item.town)}" title="${title}">
+          <div class="town-card${NOL3._selectedTowns.has(cardKey) ? ' selected' : ''}" draggable="true" data-town="${NOL3.escapeHTML(cardKey)}"${zoneContext ? ` data-zone-context="${NOL3.escapeHTML(zoneContext)}"` : ''} title="${title}">
             <div class="town-name-wrap">
-              <input type="checkbox" class="town-select-checkbox" data-town-select="${NOL3.escapeHTML(item.town)}" ${NOL3._selectedTowns.has(item.town) ? 'checked' : ''} aria-label="Select ${NOL3.escapeHTML(item.displayTown)} for batch move">
+              <input type="checkbox" class="town-select-checkbox" data-town-select="${NOL3.escapeHTML(cardKey)}" ${NOL3._selectedTowns.has(cardKey) ? 'checked' : ''} aria-label="Select ${NOL3.escapeHTML(item.displayTown)} for batch move">
               ${toggleHTML}
               <div class="town-name-col">
-                <div class="town-name">${NOL3.escapeHTML(item.displayTown)}</div>
+                <div class="town-name">${NOL3.escapeHTML(item.displayTown)}${areaSuffix}</div>
                 ${zoneIdLine ? `<div class="town-zone-ids">${NOL3.escapeHTML(zoneIdLine)}</div>` : ''}
               </div>
             </div>
@@ -7524,9 +7530,38 @@ NOL3.pages.planning = function (root) {
       renderOnFloorTowns();
     };
 
+    // A By-Zone card carries a zone-scoped key (town + Zone ID). The first time it is placed
+    // in a Delivery Area the split is recorded in Zone Settings, so ONLY that Zone ID's orders
+    // move -- "all Order IDs with this Zone ID are placed under this Zone ID".
+    // Returns true when Zone Settings changed (caller notifies after the move is done).
+    const materializeZonePieceKeys = (keys) => {
+      const list = (Array.isArray(keys) ? keys : [keys]).filter(Boolean);
+      if (!list.some(key => parseOperationalTownKey(key))) return false;
+      const { store, hub, data } = getZoneSettingsHubStore();
+      let changed = false;
+      list.forEach(key => {
+        const parsed = parseOperationalTownKey(key);
+        if (!parsed) return;
+        const town = parsed.town, zone = String(parsed.area || '');
+        if (!town || !zone) return;
+        const entry = data[town] && typeof data[town] === 'object' ? data[town] : { areas: [], assignments: {} };
+        entry.areas = Array.isArray(entry.areas) ? entry.areas : [];
+        entry.assignments = entry.assignments && typeof entry.assignments === 'object' ? entry.assignments : {};
+        if (entry.areas.some(a => String(a) === zone)) { data[town] = entry; return; }          // already defined
+        if (entry.assignments[zone] && String(entry.assignments[zone]) !== zone) return;        // zone already split elsewhere
+        entry.areas.push(zone);
+        entry.assignments[zone] = zone;
+        data[town] = entry;
+        changed = true;
+      });
+      if (changed) { store[hub] = data; saveZoneSettingsStore(store); }
+      return changed;
+    };
+
     const assignTownsToGroup = (towns, areaId, groupId, placement = null) => {
       const list = [...new Set((Array.isArray(towns) ? towns : [towns]).filter(Boolean))];
       if (!list.length || !areaId || !groupId) return;
+      const zoneSettingsChanged = materializeZonePieceKeys(list);
 
       // When a town is dropped on another town, preserve the exact drop position
       // instead of always appending it to the end of the destination group.
@@ -7573,9 +7608,11 @@ NOL3.pages.planning = function (root) {
       savePlanningLayout();
       renderDeliveryAreas();
       renderOnFloorTowns();
+      if (zoneSettingsChanged) notifyZoneSettingsChanged();
     };
 
     const assignTownToGroup = (town, areaId, groupId) => {
+      const zoneSettingsChanged = materializeZonePieceKeys([town]);
       NOL3.deliveryAreas.forEach(area => {
         const groups = ensureAreaGroups(area);
         groups.forEach(group => {
@@ -7593,6 +7630,7 @@ NOL3.pages.planning = function (root) {
       savePlanningLayout();
       refreshDeliveryAreaAfterTownMove(town, areaId, groupId);
       renderOnFloorTowns();
+      if (zoneSettingsChanged) notifyZoneSettingsChanged();
     };
 
     const assignTownToArea = (town, areaId) => {
