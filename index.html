@@ -2700,6 +2700,19 @@ th{color:#667085;font-weight:650}
 #page-instructions .g-sec{scroll-margin-top:96px}
 
 </style>
+
+<style id="assigned-rider-name-visibility-fix">
+/* Make assigned rider names readable in narrow Delivery Area groups. */
+.town-group-rider-picker{min-width:0;max-width:100%}
+.town-group-rider-chips{width:100%;min-width:0;flex-wrap:wrap;align-items:flex-start;overflow:visible;gap:4px!important}
+.rider-chip{max-width:100%;min-width:0;white-space:normal;padding:3px 5px 3px 8px!important;gap:5px!important;align-items:center}
+.rider-chip-name{display:inline-block;min-width:0;max-width:min(240px,calc(100% - 22px));white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere;line-height:1.25}
+.rider-chip-x{flex:0 0 16px!important;width:16px!important;height:16px!important;line-height:16px!important;font-size:11px!important}
+@media(max-width:900px){
+  .rider-chip-name{max-width:min(200px,calc(100% - 22px))}
+}
+</style>
+
 </head>
 <body>
 <div class="app-shell">
@@ -2959,25 +2972,75 @@ window.NOL3.escapeHTML = function(value) {
 };
 
 
-// Preset network hub list. The app supports all 26 NOL3 hubs from the
-// master hub list. Badoc Hub remains the default, but the selected hub is
-// restored locally so each hub can be opened from the same HTML app.
-// STANDALONE: there is no hub picker. The SPX Bridge reports the station the
-// SPX Portal is logged into (or it is inferred from the exported rows) and the
-// single entry below is updated through NOL3.setDetectedStation().
+// Preset network hub list. Keep all 26 NOL3 hubs selectable in this shared app.
+// Bauko retains its known station/cloud ID from this baseline. Other catalog IDs
+// are retained from the app's prior 26-hub catalog and should be verified against
+// the production hub-ID registry before using their cloud records.
 const NOL3_STATION_CODE = n => String(n || "").replace(/\bhub\b/i, "").trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "STATION";
 const NOL3_HUB_CATALOG = [
-  { id: 3634, name: "Bauko Hub", code: "BAUKO", aliases: ["3634"] }
+
+  { id: 1,  name: "Abra-Bucay Hub",               code: "ABRA_BUCAY",               aliases: [] },
+  { id: 2,  name: "Bacarra Hub",                 code: "BACARRA",                   aliases: [] },
+  { id: 3,  name: "Badoc Hub",                   code: "BADOC",                     aliases: ["3061"] },
+  { id: 4,  name: "Baguio Bakakeng Hub",         code: "BAGUIO_BAKAKENG",           aliases: [] },
+  { id: 5,  name: "Bangued Hub",                 code: "BANGUED",                   aliases: [] },
+  { id: 6,  name: "Bangui Hub",                  code: "BANGUI",                    aliases: [] },
+  { id: 7,  name: "Bantay Hub",                  code: "BANTAY",                    aliases: [] },
+  { id: 3634, name: "Bauko Hub", code: "BAUKO", aliases: ["3634"] },
+  { id: 9,  name: "Buguias Hub",                 code: "BUGUIAS",                   aliases: [] },
+  { id: 10, name: "Candon Hub",                  code: "CANDON",                    aliases: [] },
+  { id: 11, name: "Dolores-Abra Hub",            code: "DOLORES_ABRA",              aliases: [] },
+  { id: 12, name: "Ilocos Sur Hub",              code: "ILOCOS_SUR",                aliases: [] },
+  { id: 13, name: "Ilocos Sur-Santa Lucia Hub",  code: "ILOCOS_SUR_SANTA_LUCIA",    aliases: [] },
+  { id: 14, name: "Ilocos Sur-Santa Maria Hub",  code: "ILOCOS_SUR_SANTA_MARIA",    aliases: [] },
+  { id: 15, name: "Irisan Hub",                  code: "IRISAN",                    aliases: [] },
+  { id: 16, name: "Itogon Hub",                  code: "ITOGON",                    aliases: [] },
+  { id: 17, name: "Itogon-Tuding Hub",           code: "ITOGON_TUDING",             aliases: [] },
+  { id: 18, name: "Kapangan Hub",                code: "KAPANGAN",                  aliases: [] },
+  { id: 19, name: "La Paz Abra Hub",             code: "LA_PAZ_ABRA",               aliases: [] },
+  { id: 20, name: "La Trinidad-Pico Hub",        code: "LA_TRINIDAD_PICO",          aliases: [] },
+  { id: 21, name: "Laoag Hub",                   code: "LAOAG",                     aliases: [] },
+  { id: 22, name: "Narvacan Hub",                code: "NARVACAN",                  aliases: [] },
+  { id: 23, name: "North Laoag Hub",             code: "NORTH_LAOAG",               aliases: [] },
+  { id: 24, name: "San Nicolas Hub",             code: "SAN_NICOLAS",               aliases: [] },
+  { id: 25, name: "Santo Domingo Hub",           code: "SANTO_DOMINGO",             aliases: [] },
+  { id: 26, name: "Tagudin Hub",                code: "TAGUDIN",                   aliases: [] }
 ];
+// Only use cloud records when a hub ID is verified. IDs 1..26 in the preset
+// list are placeholders, not verified production IDs. Badoc and Bauko retain
+// their known baseline IDs; the SPX bridge can verify and persist other IDs.
+const NOL3_VERIFIED_HUB_IDS_KEY = "nol3_verified_hub_cloud_ids_v1";
+const NOL3_KNOWN_CLOUD_HUBS = new Set(["Badoc Hub", "Bauko Hub"]);
+let NOL3_VERIFIED_HUB_IDS = {};
+try {
+  NOL3_VERIFIED_HUB_IDS = JSON.parse(localStorage.getItem(NOL3_VERIFIED_HUB_IDS_KEY) || "{}") || {};
+} catch (_) { NOL3_VERIFIED_HUB_IDS = {}; }
+NOL3_HUB_CATALOG.forEach(h => {
+  const verifiedId = Number(NOL3_VERIFIED_HUB_IDS[h.name]);
+  if (Number.isFinite(verifiedId) && verifiedId > 0) {
+    h.id = verifiedId;
+    h.cloudIdVerified = true;
+  } else {
+    h.cloudIdVerified = NOL3_KNOWN_CLOUD_HUBS.has(h.name);
+  }
+});
+// Apply a saved bridge station ID only to the matching hub; never rename the first
+// catalog entry or collapse the hub catalog because one device is logged into SPX.
 try {
   const _st = JSON.parse(localStorage.getItem("nol3_detected_station") || "null");
   if (_st && _st.name) {
-    NOL3_HUB_CATALOG[0].name = String(_st.name);
-    NOL3_HUB_CATALOG[0].code = NOL3_STATION_CODE(_st.name);
-    if (_st.id) { NOL3_HUB_CATALOG[0].id = Number(_st.id) || 3634; NOL3_HUB_CATALOG[0].aliases = [String(_st.id)]; }
+    const token = v => String(v || "").replace(/\bhub\b/ig, "").replace(/[^a-z0-9]+/ig, "").toLowerCase();
+    const match = NOL3_HUB_CATALOG.find(h => [h.name, h.code, ...(h.aliases || [])].some(a => token(a) === token(_st.name) || String(a) === String(_st.id || "")));
+    if (match && Number(_st.id)) {
+      match.id = Number(_st.id);
+      match.cloudIdVerified = true;
+      match.aliases = [...new Set([...(match.aliases || []), String(_st.id)])];
+      NOL3_VERIFIED_HUB_IDS[match.name] = Number(_st.id);
+      localStorage.setItem(NOL3_VERIFIED_HUB_IDS_KEY, JSON.stringify(NOL3_VERIFIED_HUB_IDS));
+    }
   }
 } catch (_) {}
-let NOL3_DEFAULT_HUB_NAME = NOL3_HUB_CATALOG[0].name;
+let NOL3_DEFAULT_HUB_NAME = "Badoc Hub";
 const NOL3_PRESET_HUBS = NOL3_HUB_CATALOG.map(h => h.name);
 
 (function () {
@@ -3009,7 +3072,7 @@ const NOL3_PRESET_HUBS = NOL3_HUB_CATALOG.map(h => h.name);
 
   NOL3.getSelectedHubConfig = function () {
     const selected = NOL3.getState?.().selectedHub || NOL3_DEFAULT_HUB_NAME;
-    return NOL3.getHubConfig(selected) || NOL3_HUB_CATALOG[0];
+    return NOL3.getHubConfig(selected) || NOL3.getHubConfig(NOL3_DEFAULT_HUB_NAME) || NOL3_HUB_CATALOG[0];
   };
 
   NOL3.getHubAliases = function (hub) {
@@ -3034,8 +3097,8 @@ const NOL3_PRESET_HUBS = NOL3_HUB_CATALOG.map(h => h.name);
   };
 
   NOL3.getHubName = () => NOL3.getSelectedHubConfig()?.name || NOL3_DEFAULT_HUB_NAME;
-  NOL3.getHubCode = () => NOL3.getSelectedHubConfig()?.code || "BAUKO";
-  NOL3.getHubId = () => Number(NOL3.getSelectedHubConfig()?.id || 3634);
+  NOL3.getHubCode = () => NOL3.getSelectedHubConfig()?.code || "BADOC";
+  NOL3.getHubId = () => Number(NOL3.getSelectedHubConfig()?.id || 3);
 
   window.NOL3_HUB_CATALOG = NOL3_HUB_CATALOG;
 })();
@@ -3052,12 +3115,19 @@ const NOL3_PRESET_HUBS = NOL3_HUB_CATALOG.map(h => h.name);
     const parsedHubs = rawHubs ? JSON.parse(rawHubs) : [];
     if (Array.isArray(parsedHubs)) savedHubs = parsedHubs.map(v => String(v || "").trim()).filter(Boolean);
     savedSelected = String(NOL3Storage.get(SELECTED_HUB_KEY) || "").trim();
+    const defaultMigrationKey = "nol3_badoc_default_migrated_v1";
+    const migratedDefault = NOL3Storage.get(defaultMigrationKey) === "1";
+    if (!migratedDefault) {
+      if (savedSelected === "Bauko Hub") savedSelected = "Badoc Hub";
+      NOL3Storage.set(defaultMigrationKey, "1");
+      if (savedSelected === "Badoc Hub") NOL3Storage.set(SELECTED_HUB_KEY, savedSelected);
+    }
   } catch (_) {}
 
   // Always expose all 26 preset hubs. Keep any valid custom hubs that were
   // previously added, but never let an old one-hub build remove the presets.
   const customHubs = savedHubs.filter(h => h && !presetSet.has(h));
-  const hubs = [...NOL3_PRESET_HUBS];
+  const hubs = [...new Set([...NOL3_PRESET_HUBS, ...customHubs])];
   NOL3Storage.set(HUBS_KEY, JSON.stringify(hubs));
 
   const selectedHub = hubs.includes(savedSelected) ? savedSelected : NOL3_DEFAULT_HUB_NAME;
@@ -3072,8 +3142,8 @@ const NOL3_PRESET_HUBS = NOL3_HUB_CATALOG.map(h => h.name);
   try {
     const cfg = NOL3.getHubConfig(selectedHub) || NOL3.getHubConfig(NOL3_DEFAULT_HUB_NAME);
     window.HUB_NAME = cfg?.name || selectedHub;
-    window.HUB_CODE = cfg?.code || "BAUKO";
-    window.HUB_ID = Number(cfg?.id || 3634);
+    window.HUB_CODE = cfg?.code || "BADOC";
+    window.HUB_ID = Number(cfg?.id || 3);
   } catch (_) {}
 
   NOL3.getState = function () {
@@ -3109,25 +3179,37 @@ const NOL3_PRESET_HUBS = NOL3_HUB_CATALOG.map(h => h.name);
     }));
   };
 
-  // Called by the SPX Bridge (station the portal is logged into) or inferred
-  // from export rows. Replaces the old hub picker.
+  // Bridge detection may update a known hub's real station ID, but it must
+  // never replace the full hub selector or override a user's manual selection.
   NOL3.setDetectedStation = function (name, id) {
     const clean = String(name || "").trim();
     if (!clean) return false;
-    const cfg = NOL3_HUB_CATALOG[0];
-    const sameName = cfg.name === clean;
-    if (id && Number(id) && Number(id) !== cfg.id) { cfg.id = Number(id); cfg.aliases = [String(id)]; }
-    if (sameName) { try { localStorage.setItem("nol3_detected_station", JSON.stringify({ name: cfg.name, id: cfg.id })); } catch (_) {} return false; }
-    cfg.name = clean;
-    cfg.code = NOL3_STATION_CODE(clean);
-    NOL3_DEFAULT_HUB_NAME = clean;
-    NOL3.state.hubs = [clean];
-    NOL3.state.selectedHub = clean;
-    NOL3Storage.set(HUBS_KEY, JSON.stringify(NOL3.state.hubs));
-    NOL3Storage.set(SELECTED_HUB_KEY, clean);
-    try { localStorage.setItem("nol3_detected_station", JSON.stringify({ name: clean, id: cfg.id })); } catch (_) {}
-    try { window.HUB_NAME = clean; window.HUB_CODE = cfg.code; window.HUB_ID = Number(cfg.id); } catch (_) {}
-    window.dispatchEvent(new CustomEvent("hubchange", { detail: { hub: clean, hubCode: cfg.code, hubId: Number(cfg.id) } }));
+    let cfg = NOL3.getHubConfig(clean);
+    const numericId = Number(id);
+    if (!cfg && Number.isFinite(numericId) && numericId > 0) {
+      // Keep an unlisted station as an additional option instead of deleting presets.
+      cfg = { id: numericId, name: clean, code: NOL3_STATION_CODE(clean), aliases: [String(numericId)] };
+      NOL3_HUB_CATALOG.push(cfg);
+      if (!NOL3.state.hubs.includes(clean)) NOL3.state.hubs.push(clean);
+      NOL3Storage.set(HUBS_KEY, JSON.stringify(NOL3.state.hubs));
+    }
+    if (!cfg) return false;
+    if (Number.isFinite(numericId) && numericId > 0) {
+      cfg.id = numericId;
+      cfg.cloudIdVerified = true;
+      cfg.aliases = [...new Set([...(Array.isArray(cfg.aliases) ? cfg.aliases : []), String(numericId)])];
+      try {
+        const ids = JSON.parse(localStorage.getItem(NOL3_VERIFIED_HUB_IDS_KEY) || "{}") || {};
+        ids[cfg.name] = numericId;
+        localStorage.setItem(NOL3_VERIFIED_HUB_IDS_KEY, JSON.stringify(ids));
+      } catch (_) {}
+    }
+    try { localStorage.setItem("nol3_detected_station", JSON.stringify({ name: cfg.name, id: cfg.id })); } catch (_) {}
+    // Only refresh cloud globals if the detected hub is already selected.
+    if (NOL3.state.selectedHub === cfg.name) {
+      try { window.HUB_NAME = cfg.name; window.HUB_CODE = cfg.code; window.HUB_ID = Number(cfg.id); } catch (_) {}
+      window.dispatchEvent(new CustomEvent("hubchange", { detail: { hub: cfg.name, hubCode: cfg.code, hubId: Number(cfg.id) } }));
+    }
     return true;
   };
 
@@ -7494,15 +7576,21 @@ NOL3.pages.planning = function (root) {
     const loadPlanningLayout = () => {
       try {
         const raw = NOL3Storage.get(PLANNING_LAYOUT_KEY);
-        if (!raw) return false;
-        let store = JSON.parse(raw);
-        let saved;
+        let store = raw ? JSON.parse(raw) : {};
+        // Migrate the old single-layout format to Badoc Hub only. Treating the
+        // legacy array as every hub's layout was making every selected hub show
+        // the same Delivery Areas and town groups.
         if (Array.isArray(store)) {
-          saved = store;
-        } else {
-          saved = store?.byHub?.[getPlanningHubKey()];
+          store = { version: 2, byHub: { [NOL3_DEFAULT_HUB_NAME]: store } };
+          NOL3Storage.set(PLANNING_LAYOUT_KEY, JSON.stringify(store));
         }
-        if (!Array.isArray(saved)) return false;
+        const saved = store?.byHub?.[getPlanningHubKey()];
+        if (!Array.isArray(saved)) {
+          // Do not leave the previous hub's layout in memory when the newly
+          // selected hub has no saved layout of its own.
+          NOL3.deliveryAreas = [];
+          return false;
+        }
 
         const restored = saved.map(savedArea => ({
           id: String(savedArea.id || `area-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
@@ -8450,9 +8538,13 @@ NOL3.pages.planning = function (root) {
         const scoped = NOL3Storage.get(hubKey);
         const value = Number(scoped);
         if (Number.isFinite(value) && value > 0) return value;
-        // Preserve the existing target once, then future saves are hub-scoped.
-        const legacy = Number(NOL3Storage.get(PLANNING_FP_KEY));
-        return Number.isFinite(legacy) && legacy > 0 ? legacy : 50;
+        // Legacy unscoped value belongs to the original Badoc profile only.
+        // Do not leak it into every other hub when no hub-specific value exists.
+        if (String((NOL3.getState && NOL3.getState().selectedHub) || "").trim() === NOL3_DEFAULT_HUB_NAME) {
+          const legacy = Number(NOL3Storage.get(PLANNING_FP_KEY));
+          if (Number.isFinite(legacy) && legacy > 0) return legacy;
+        }
+        return 50;
       } catch (error) { return 50; }
     };
     const saveFleetProductivityTarget = value => {
@@ -11190,6 +11282,26 @@ NOL3.pages.riders = function (root) {
         <div class="brand-text">NOL3 Planning</div>
       </div>
 
+      <div class="hub-box">
+        <div class="hub-label">Selected Hub</div>
+        <div class="hub-row">
+          <div class="hub-picker" id="hubPicker">
+            <button type="button" class="hub-picker-btn" id="hubPickerBtn" aria-haspopup="listbox" aria-expanded="false">
+              <span id="hubPickerLabel">${selectedHub || "Select Hub"}</span>
+              <span class="hub-picker-arrow" aria-hidden="true"></span>
+            </button>
+            <div class="hub-picker-menu" id="hubPickerMenu" role="listbox">
+              ${state.hubs.length ? state.hubs.map((hub) => `
+                <div class="hub-picker-option ${hub === selectedHub ? "selected" : ""}" role="option" aria-selected="${hub === selectedHub ? "true" : "false"}" data-hub="${String(hub).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/\"/g,"&quot;")}">
+                  <span class="hub-picker-name" data-select-hub="${String(hub).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/\"/g,"&quot;")}">${String(hub).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}</span>
+                </div>
+              `).join("") : `<div class="hub-picker-empty">No hubs added yet.</div>`}
+            </div>
+          </div>
+
+        </div>
+      </div>
+
       <nav class="nav" aria-label="Main navigation">
         ${Object.entries(pageNames).map(([page, label]) => `
           <button class="nav-item ${state.currentPage === page ? "active" : ""}" data-page="${page}">
@@ -11204,6 +11316,53 @@ NOL3.pages.riders = function (root) {
       </div>
     `;
 
+
+    const picker = document.getElementById("hubPicker");
+    const pickerBtn = document.getElementById("hubPickerBtn");
+
+    if (selectedHub && state.selectedHub !== selectedHub) {
+      NOL3.setSelectedHub(selectedHub);
+    }
+
+    if (picker && pickerBtn) {
+      pickerBtn.addEventListener("click", function (event) {
+        event.stopPropagation();
+        const open = picker.classList.toggle("open");
+        pickerBtn.setAttribute("aria-expanded", open ? "true" : "false");
+      });
+
+      picker.querySelectorAll("[data-select-hub]").forEach((item) => {
+        item.addEventListener("click", function () {
+          const hub = item.getAttribute("data-select-hub");
+          if (!hub) return;
+          const previousHub = String(NOL3.getState()?.selectedHub || "").trim();
+          if (hub === previousHub) {
+            picker.classList.remove("open");
+            pickerBtn.setAttribute("aria-expanded", "false");
+            return;
+          }
+
+          // Persist the selected hub before reloading. A full app reload reruns
+          // the hub-specific local-storage restore path so settings and device-
+          // local inventory are initialized for the newly selected hub.
+          NOL3.setSelectedHub(hub);
+          try { NOL3Storage.set("nol3_selected_hub", hub); } catch (_) {}
+          try { localStorage.setItem("nol3_selected_hub", hub); } catch (_) {}
+          picker.classList.remove("open");
+          pickerBtn.setAttribute("aria-expanded", "false");
+
+          // Allow synchronous hubchange listeners to finish before reloading.
+          window.setTimeout(() => window.location.reload(), 100);
+        });
+      });
+
+      document.addEventListener("click", function closeHubPicker(event) {
+        if (!picker.contains(event.target)) {
+          picker.classList.remove("open");
+          pickerBtn.setAttribute("aria-expanded", "false");
+        }
+      }, { once: true });
+    }
 
     document.querySelectorAll(".nav-item").forEach((button) => {
       button.addEventListener("click", function () {
@@ -11271,84 +11430,155 @@ NOL3.pages.riders = function (root) {
 
 
 
-/* NOL3 File Store fallback
- * Hub-aware local operational persistence. Incoming + Linehaul uploads are
- * stored separately per selected hub and never leave this browser.
+/* NOL3 device-only operational store.
+ * Operational uploads stay on this browser/device. They are never uploaded to
+ * Firebase/Supabase. IndexedDB is the durable large-data store when available;
+ * localStorage is retained as a compatibility/fallback cache.
  */
 (function () {
   const records = new Map();
   const histories = new Map();
-  const PERSIST_PREFIX = "NOL3_LOCAL_OPERATIONAL_V3:";
+  const idbRecords = new Map();
+  const PERSIST_PREFIX = "NOL3_LOCAL_OPERATIONAL_V4:";
+  const PREVIOUS_PREFIX = "NOL3_LOCAL_OPERATIONAL_V3:";
   const LEGACY_PREFIX = "NOL3_LOCAL_OPERATIONAL_V2:";
-  const PERSIST_TYPES = new Set(["incoming", "linehaul"]);
+  const HISTORY_PREFIX = "NOL3_LOCAL_LM_HISTORY_V1:";
+  const PERSIST_TYPES = new Set(["lm", "incoming", "linehaul", "unifiedInventory", "unifiedInventoryUndo"]);
+  const DB_NAME = "NOL3_DEVICE_OPERATIONAL_STORE_V1";
+  const DB_VERSION = 1;
+  const DB_STORE = "records";
+  const LOCAL_CACHE_LIMIT = 180000;
+  let dbPromise = null;
+  let readyPromise = null;
+  let idbAvailable = false;
 
-  const currentHubCode = () => String(NOL3.getHubCode?.() || "BADOC").trim().toUpperCase();
-  const persistKey = type => `${PERSIST_PREFIX}${currentHubCode()}:${String(type)}`;
+  const currentHubCode = () => String(NOL3.getHubCode?.() || window.HUB_CODE || "BADOC").trim().toUpperCase();
+  const persistKey = (type, hub = currentHubCode()) => `${PERSIST_PREFIX}${hub}:${String(type)}`;
   const legacyKey = type => `${LEGACY_PREFIX}${String(type)}`;
+  const historyKey = (date, hub = currentHubCode()) => `${HISTORY_PREFIX}${hub}:${String(date || "").trim()}`;
 
   function clone(value) {
     if (value == null) return value;
     try { return JSON.parse(JSON.stringify(value)); } catch (_) { return value; }
   }
+  const fileMeta = list => Array.isArray(list) ? list.map(f => ({
+    name: f?.name || "", lastModified: f?.lastModified || 0
+  })).filter(f => f.name) : [];
 
-  function slimOperationalRecord(record) {
-    if (!record || !record.type || !record.dataset) return record;
-    const d = record.dataset || {};
-    return {
-      type: String(record.type),
-      savedAt: record.savedAt || new Date().toISOString(),
-      files: Array.isArray(record.files) ? record.files.map(f => ({name:f?.name || "",lastModified:f?.lastModified || 0})) : [],
-      dataset: {
-        fileName: d.fileName || "",
-        headers: Array.isArray(d.headers) ? d.headers : [],
-        rows: Array.isArray(d.rows) ? d.rows : [],
-        rawText: "",
-        loadedAt: d.loadedAt || record.savedAt || new Date().toISOString()
-      }
-    };
+  // Keep parsed rows/headers and filenames; raw CSV strings are intentionally
+  // omitted because rows already contain the operational data and CSV text
+  // duplicates can exhaust browser localStorage quotas.
+  function compactRecord(record) {
+    if (!record || !record.type) return record;
+    const out = { ...record, type: String(record.type), savedAt: record.savedAt || new Date().toISOString() };
+    if (Array.isArray(record.files)) out.files = fileMeta(record.files);
+    if (record.dataset && typeof record.dataset === "object") {
+      const d = { ...record.dataset, rawText: "" };
+      if (Array.isArray(d.rows)) d.rows = d.rows;
+      out.dataset = d;
+    }
+    // Undo records can contain old inventory snapshots; preserve their exact
+    // shape in IndexedDB but avoid trying to stuff large undo payloads in localStorage.
+    return out;
   }
-
-  function persistRecord(record) {
-    if (!record || !PERSIST_TYPES.has(String(record.type))) return;
-    try { localStorage.setItem(persistKey(record.type), JSON.stringify(slimOperationalRecord(record))); }
-    catch (error) { console.warn("NOL3: local operational persistence failed", error); }
+  function rowScore(type, record) {
+    const d = record?.dataset || {};
+    if (type === "unifiedInventory") return (d.lmRows?.length || 0) + (d.incomingRows?.length || 0) + (d.rows?.length || 0);
+    if (type === "unifiedInventoryUndo") return rowScore("unifiedInventory", record?.snapshot || record?.lmRecord || {}) + rowScore("lm", record?.lmRecord || {});
+    return Array.isArray(d.rows) ? d.rows.length : 0;
   }
-
-  function loadPersistedRecord(type) {
-    if (!PERSIST_TYPES.has(String(type))) return null;
-    const keys = [persistKey(type)];
-    // One-time migration for the existing Badoc V2 cache.
-    if (currentHubCode() === "BADOC") keys.push(legacyKey(type));
+  function chooseMoreComplete(type, a, b) {
+    if (!a) return clone(b);
+    if (!b) return clone(a);
+    const sa = rowScore(type, a), sb = rowScore(type, b);
+    if (sa !== sb) return clone(sb > sa ? b : a);
+    const ta = Date.parse(a.savedAt || a.dataset?.loadedAt || "") || 0;
+    const tb = Date.parse(b.savedAt || b.dataset?.loadedAt || "") || 0;
+    const chosen = clone(tb >= ta ? b : a);
+    // Keep filenames from both copies so the upload history remains visible.
+    if (Array.isArray(a.files) || Array.isArray(b.files)) {
+      chosen.files = fileMeta([...(a.files || []), ...(b.files || [])]
+        .filter((f, i, arr) => arr.findIndex(x => x.name === f.name && x.lastModified === f.lastModified) === i));
+    }
+    return chosen;
+  }
+  function persistLocal(record, hub = currentHubCode(), force = false) {
+    if (!record || !PERSIST_TYPES.has(String(record.type))) return false;
+    try {
+      const compact = compactRecord(record);
+      const raw = JSON.stringify(compact);
+      if (!force && raw.length > LOCAL_CACHE_LIMIT) return false;
+      localStorage.setItem(persistKey(record.type, hub), raw);
+      return true;
+    } catch (error) {
+      console.warn("NOL3: Local operational cache write failed; attempting device database.", error);
+      return false;
+    }
+  }
+  function parseLocalRecord(type, hub = currentHubCode()) {
+    const keys = [persistKey(type, hub), `${PREVIOUS_PREFIX}${hub}:${String(type)}`];
+    // Migrate old unscoped Incoming/Linehaul cache only for Badoc.
+    if (hub === "BADOC" && ["incoming", "linehaul"].includes(type)) keys.push(legacyKey(type));
     for (const key of keys) {
       try {
         const raw = localStorage.getItem(key);
         if (!raw) continue;
         const parsed = JSON.parse(raw);
-        if (parsed && parsed.dataset && Array.isArray(parsed.dataset.rows)) {
-          if (key !== persistKey(type)) {
-            try { localStorage.setItem(persistKey(type), JSON.stringify(parsed)); } catch (_) {}
+        if (parsed && (parsed.dataset || parsed.snapshot || parsed.lmRecord)) {
+          if (key !== persistKey(type, hub)) {
+            try { localStorage.setItem(persistKey(type, hub), JSON.stringify(compactRecord(parsed))); } catch (_) {}
           }
           return parsed;
         }
-      } catch (error) { console.warn("NOL3: could not restore local operational record", type, error); }
+      } catch (error) { console.warn("NOL3: Could not restore local operational record", type, error); }
     }
     return null;
   }
-
-  function loadHubRecords() {
-    records.clear();
-    for (const type of PERSIST_TYPES) {
-      const restored = loadPersistedRecord(type);
-      if (restored) records.set(type, restored);
-    }
+  function openDb() {
+    if (dbPromise) return dbPromise;
+    dbPromise = new Promise((resolve, reject) => {
+      if (!window.indexedDB) { reject(new Error("IndexedDB is unavailable")); return; }
+      let request;
+      try { request = indexedDB.open(DB_NAME, DB_VERSION); }
+      catch (e) { reject(e); return; }
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(DB_STORE)) db.createObjectStore(DB_STORE, { keyPath: "key" });
+      };
+      request.onsuccess = () => { idbAvailable = true; resolve(request.result); };
+      request.onerror = () => reject(request.error || new Error("Could not open device database"));
+      request.onblocked = () => reject(new Error("Device database upgrade is blocked"));
+    }).catch(error => { idbAvailable = false; console.warn("NOL3: IndexedDB unavailable; using localStorage fallback.", error); return null; });
+    return dbPromise;
   }
-  loadHubRecords();
-
+  async function idbPut(entry) {
+    const db = await openDb();
+    if (!db) return false;
+    return new Promise(resolve => {
+      let tx;
+      try { tx = db.transaction(DB_STORE, "readwrite"); tx.objectStore(DB_STORE).put(entry); }
+      catch (_) { resolve(false); return; }
+      tx.oncomplete = () => { idbRecords.set(entry.key, clone(entry)); resolve(true); };
+      tx.onerror = tx.onabort = () => resolve(false);
+    });
+  }
+  async function idbDelete(key) {
+    const db = await openDb();
+    idbRecords.delete(key);
+    if (!db) return false;
+    return new Promise(resolve => {
+      let tx;
+      try { tx = db.transaction(DB_STORE, "readwrite"); tx.objectStore(DB_STORE).delete(key); }
+      catch (_) { resolve(false); return; }
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = tx.onabort = () => resolve(false);
+    });
+  }
   function datasetToInventory(record) {
     const d = record?.dataset || {};
     return {
       fileName: d.fileName || "",
-      files: Array.isArray(record?.files) ? record.files : [],
+      files: fileMeta(record?.files),
       rows: Array.isArray(d.rows) ? d.rows : [],
       filteredRows: [],
       headers: Array.isArray(d.headers) ? d.headers : [],
@@ -11357,17 +11587,154 @@ NOL3.pages.riders = function (root) {
       rawText: typeof d.rawText === "string" ? d.rawText : ""
     };
   }
+  function loadHubRecords() {
+    records.clear();
+    const hub = currentHubCode();
+    for (const type of PERSIST_TYPES) {
+      const local = parseLocalRecord(type, hub);
+      const indexed = idbRecords.get(`${hub}:${type}`)?.record || null;
+      const best = chooseMoreComplete(type, local, indexed);
+      if (best) records.set(type, best);
+    }
+    for (const [key, entry] of idbRecords) {
+      if (entry?.kind === "history" && entry.hubCode === hub && entry.record?.businessDate) {
+        histories.set(`${hub}:${entry.record.businessDate}`, clone(entry.record));
+      }
+    }
+    try {
+      const prefix = `${HISTORY_PREFIX}${hub}:`;
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (!key || !key.startsWith(prefix)) continue;
+        try {
+          const record = JSON.parse(localStorage.getItem(key) || "null");
+          if (record?.businessDate) histories.set(`${hub}:${record.businessDate}`, record);
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+  async function ready() {
+    if (!readyPromise) readyPromise = (async () => {
+      const db = await openDb();
+      if (db) {
+        await new Promise(resolve => {
+          let tx;
+          try { tx = db.transaction(DB_STORE, "readonly"); }
+          catch (_) { resolve(); return; }
+          const req = tx.objectStore(DB_STORE).getAll();
+          req.onsuccess = () => {
+            for (const entry of (req.result || [])) if (entry?.key) idbRecords.set(entry.key, entry);
+            resolve();
+          };
+          req.onerror = () => resolve();
+        });
+      }
+      loadHubRecords();
+      return true;
+    })();
+    return readyPromise;
+  }
 
+  const storageKeyForEntry = (hub, type) => `${hub}:${type}`;
+  async function persistRecord(record, hub = currentHubCode()) {
+    if (!record || !PERSIST_TYPES.has(String(record.type))) return true;
+    const type = String(record.type);
+    const compact = compactRecord(record);
+    const entry = { key: storageKeyForEntry(hub, type), hubCode: hub, kind: "record", type, record: compact, savedAt: new Date().toISOString() };
+    // Save small datasets in localStorage for compatibility with browsers that
+    // disallow IndexedDB; large datasets go to IndexedDB first to avoid quota.
+    let localSaved = persistLocal(compact, hub, false);
+    const dbSaved = await idbPut(entry);
+    if (!dbSaved && !localSaved) localSaved = persistLocal(compact, hub, true);
+    if (!dbSaved && !localSaved) {
+      console.error("NOL3: Operational data could not be persisted to device storage. Keep the page open and export the source CSV.");
+      return false;
+    }
+    // Keep the in-memory persistent copy compact; it contains all parsed rows.
+    const best = chooseMoreComplete(type, records.get(type), compact);
+    records.set(type, best);
+    return true;
+  }
+
+  const historyCacheKey = (hub, date) => `${hub}:${date}`;
+  function compactHistory(record) {
+    if (!record) return record;
+    return {
+      businessDate: String(record.businessDate || ""),
+      uploadDate: String(record.uploadDate || record.businessDate || ""),
+      files: fileMeta(record.files),
+      dataset: record.dataset ? { ...record.dataset, rawText: "" } : null,
+      savedAt: record.savedAt || new Date().toISOString()
+    };
+  }
+
+  // Initial synchronous localStorage migration/read for immediate UI, then IDB
+  // hydration is completed by ready() before the startup restore path runs.
+  loadHubRecords();
   window.NOL3FileStore = {
-    getAll(){ return Array.from(records.values()).map(clone); },
-    get(type){ return clone(records.get(String(type)) || null); },
-    put(record){ if(!record || !record.type)return; const type=String(record.type); records.set(type,clone(record)); persistRecord(record); },
-    remove(type){ const key=String(type); records.delete(key); if(PERSIST_TYPES.has(key)){ try{localStorage.removeItem(persistKey(key));}catch(_){} } },
-    putHistory(record){ if(record && record.businessDate) histories.set(String(record.businessDate),clone(record)); },
-    getHistory(date){ return clone(histories.get(String(date||'').trim()) || null); },
-    removeHistory(date){ histories.delete(String(date||'').trim()); },
-    getHistories(){ return Array.from(histories.values()).map(clone); },
-    switchHub(){
+    ready,
+    getAll() { return Array.from(records.values()).map(clone); },
+    get(type) { return clone(records.get(String(type)) || null); },
+    async put(record) {
+      if (!record || !record.type) return false;
+      const type = String(record.type);
+      const compact = compactRecord(record);
+      const best = chooseMoreComplete(type, records.get(type), compact);
+      records.set(type, clone(best));
+      if (PERSIST_TYPES.has(type)) return persistRecord(best);
+      // Small/undo metadata is kept in this device database too, but never synced.
+      const hub = currentHubCode();
+      const entry = { key: storageKeyForEntry(hub, type), hubCode: hub, kind: "record", type, record: compact, savedAt: new Date().toISOString() };
+      const ok = await idbPut(entry);
+      if (!ok && type === "unifiedInventoryUndo") {
+        try { localStorage.setItem(persistKey(type, hub), JSON.stringify(compact)); return true; } catch (_) { return false; }
+      }
+      return ok;
+    },
+    remove(type) {
+      const key = String(type), hub = currentHubCode();
+      records.delete(key);
+      try { localStorage.removeItem(persistKey(key, hub)); } catch (_) {}
+      try { localStorage.removeItem(`${PREVIOUS_PREFIX}${hub}:${key}`); } catch (_) {}
+      if (hub === "BADOC" && ["incoming", "linehaul"].includes(key)) { try { localStorage.removeItem(legacyKey(key)); } catch (_) {} }
+      idbDelete(storageKeyForEntry(hub, key)).catch(() => {});
+    },
+    async putHistory(record) {
+      if (!record || !record.businessDate) return false;
+      const hub = currentHubCode(), date = String(record.businessDate).trim();
+      const compact = compactHistory(record), key = historyCacheKey(hub, date);
+      histories.set(key, clone(compact));
+      let localSaved = false;
+      try {
+        const raw = JSON.stringify(compact);
+        if (raw.length <= LOCAL_CACHE_LIMIT) { localStorage.setItem(historyKey(date, hub), raw); localSaved = true; }
+      } catch (_) {}
+      const entry = { key: `${hub}:history:${date}`, hubCode: hub, kind: "history", record: compact, savedAt: new Date().toISOString() };
+      const dbSaved = await idbPut(entry);
+      if (!dbSaved && !localSaved) {
+        try { localStorage.setItem(historyKey(date, hub), JSON.stringify(compact)); localSaved = true; } catch (error) { console.error("NOL3: LM history could not be saved to device storage.", error); }
+      }
+      return dbSaved || localSaved;
+    },
+    getHistory(date) {
+      const hub = currentHubCode(), d = String(date || "").trim(), key = historyCacheKey(hub, d);
+      if (histories.has(key)) return clone(histories.get(key));
+      const indexed = idbRecords.get(`${hub}:history:${d}`)?.record;
+      if (indexed) { histories.set(key, indexed); return clone(indexed); }
+      try {
+        const local = JSON.parse(localStorage.getItem(historyKey(d, hub)) || "null");
+        if (local) { histories.set(key, local); return clone(local); }
+      } catch (_) {}
+      return null;
+    },
+    async removeHistory(date) {
+      const hub = currentHubCode(), d = String(date || "").trim(), key = historyCacheKey(hub, d);
+      histories.delete(key);
+      try { localStorage.removeItem(historyKey(d, hub)); } catch (_) {}
+      return idbDelete(`${hub}:history:${d}`);
+    },
+    getHistories() { const hub = currentHubCode(); return Array.from(histories.values()).filter(r => String(r.businessDate || "") && histories.has(historyCacheKey(hub, r.businessDate))).map(clone); },
+    switchHub() {
       loadHubRecords();
       const incoming = records.get("incoming");
       const linehaul = records.get("linehaul");
@@ -11377,17 +11744,44 @@ NOL3.pages.riders = function (root) {
       else NOL3.lineHaulInventory = {files:[],rows:[],filteredRows:[],fileName:"",headers:[],loadedAt:"",rowCount:0,rawText:""};
       return { incoming: !!incoming, linehaul: !!linehaul };
     },
-    clearOperational(){
-      records.delete("incoming"); records.delete("linehaul"); records.delete("lm"); records.delete("unifiedInventory"); records.delete("unifiedInventoryUndo");
-      for(const type of PERSIST_TYPES){ try{localStorage.removeItem(persistKey(type));}catch(_){} }
-      if(currentHubCode()==="BADOC") for(const type of PERSIST_TYPES){ try{localStorage.removeItem(legacyKey(type));}catch(_){} }
+    async clearOperational() {
+      const hub = currentHubCode();
+      records.clear();
+      for (const type of PERSIST_TYPES) {
+        try { localStorage.removeItem(persistKey(type, hub)); } catch (_) {}
+        try { localStorage.removeItem(`${PREVIOUS_PREFIX}${hub}:${type}`); } catch (_) {}
+      }
+      if (hub === "BADOC") for (const type of ["incoming", "linehaul"]) { try { localStorage.removeItem(legacyKey(type)); } catch (_) {} }
+      try {
+        const prefix = `${HISTORY_PREFIX}${hub}:`;
+        const removeKeys = [];
+        for (let i = localStorage.length - 1; i >= 0; i--) { const key = localStorage.key(i); if (key && key.startsWith(prefix)) removeKeys.push(key); }
+        removeKeys.forEach(key => localStorage.removeItem(key));
+      } catch (_) {}
+      for (const [key, entry] of Array.from(idbRecords.entries())) {
+        if (entry?.hubCode === hub) { idbRecords.delete(key); }
+      }
       histories.clear();
+      const db = await openDb();
+      if (db) {
+        await new Promise(resolve => {
+          let tx;
+          try {
+            tx = db.transaction(DB_STORE, "readwrite");
+            const req = tx.objectStore(DB_STORE).openCursor();
+            req.onsuccess = () => {
+              const cursor = req.result;
+              if (!cursor) return;
+              if (cursor.value?.hubCode === hub) cursor.delete();
+              cursor.continue();
+            };
+          } catch (_) { resolve(); return; }
+          tx.oncomplete = tx.onerror = tx.onabort = () => resolve();
+        });
+      }
+      return true;
     }
   };
-
-  window.addEventListener("hubchange", () => {
-    try { window.NOL3FileStore.switchHub(); } catch (error) { console.warn("NOL3: hub operational store switch failed", error); }
-  });
 })();
 
 
@@ -11466,11 +11860,9 @@ NOL3.pages.riders = function (root) {
     if (clearProgress.close) clearProgress.close.disabled = false;
   };
 
-  const resetOperationalMemory = () => {
-    // NOL3FileStore is the active local operational store in this build.
-    // clearOperational removes current uploads, unified snapshots, undo data,
-    // and all dated LM history in one synchronous operation.
-    try { NOL3FileStore?.clearOperational?.(); } catch (error) {
+  const resetOperationalMemory = async () => {
+    // Clear local device records only after the user confirms the Clear button.
+    try { await NOL3FileStore?.clearOperational?.(); } catch (error) {
       console.warn("NOL3: Could not clear local operational store.", error);
     }
     try { NOL3._inventoryUndoMemory = null; } catch (_) {}
@@ -11510,7 +11902,7 @@ NOL3.pages.riders = function (root) {
       // immediate render calls. This removes the main source of avoidable lag.
       setClearProgress("uploads", 35, "Removing LM, Incoming, and Linehaul uploads…", "Clearing the three operational datasets together.");
       await nextPaint();
-      resetOperationalMemory();
+      await resetOperationalMemory();
       await nextPaint();
 
       setClearProgress("history", 65, "Removing saved upload history and undo data…", "Deleting dated LM history and compatibility snapshots.");
@@ -11729,14 +12121,17 @@ NOL3.pages.riders = function (root) {
   const LM_HISTORY_STORE = "lmHistory";
   const TYPES = ["lm", "incoming", "linehaul"];
 
-  // IndexedDB is intentionally not used here. The app is frequently opened
-  // directly from Android's content://downloads origin, where IndexedDB can
-  // fail with "Internal error opening backing store". The cloud layer provides
-  // durable persistence across devices.
+  // Operational inventory is persisted on this device via NOL3FileStore.
+  // No operational inventory is sent to Firebase or Supabase.
   const put = async (record) => {
-    if (window.NOL3FileStore) NOL3FileStore.put(record);
+    if (window.NOL3FileStore) return await NOL3FileStore.put(record);
+    return false;
   };
-  const get = async (type) => window.NOL3FileStore ? NOL3FileStore.get(type) : null;
+  const get = async (type) => {
+    if (!window.NOL3FileStore) return null;
+    try { await NOL3FileStore.ready?.(); } catch (_) {}
+    return NOL3FileStore.get(type);
+  };
 
   NOL3._storagePut = put;
   NOL3._storageGet = get;
@@ -11746,13 +12141,16 @@ NOL3.pages.riders = function (root) {
   NOL3.getLMHistoryKey = getLMHistoryKey;
 
   async function putLMHistory(record) {
-    if (window.NOL3FileStore) NOL3FileStore.putHistory(record);
+    if (window.NOL3FileStore) return await NOL3FileStore.putHistory(record);
+    return false;
   }
   async function getLMHistoryRecord(businessDate) {
-    return window.NOL3FileStore ? NOL3FileStore.getHistory(businessDate) : null;
+    if (!window.NOL3FileStore) return null;
+    try { await NOL3FileStore.ready?.(); } catch (_) {}
+    return NOL3FileStore.getHistory(businessDate);
   }
   async function removeLMHistory(businessDate) {
-    if (window.NOL3FileStore) NOL3FileStore.removeHistory(businessDate);
+    if (window.NOL3FileStore) return await NOL3FileStore.removeHistory(businessDate);
   }
 
   NOL3.saveLMHistorySnapshot = async function (businessDate, dataset, files) {
@@ -11783,6 +12181,10 @@ NOL3.pages.riders = function (root) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
     return getLMHistoryRecord(date);
   };
+
+  function fileMetaForRestore(files) {
+    return Array.isArray(files) ? files.map(item => ({name:item?.name || "", lastModified:item?.lastModified || 0})).filter(item => item.name) : [];
+  }
 
   function remove(type) {
     return Promise.resolve().then(() => {
@@ -11983,7 +12385,7 @@ NOL3.pages.riders = function (root) {
           arr.findIndex(x => x.name === item.name && (x.lastModified || 0) === (item.lastModified || 0)) === index
         );
       }
-      const record = { type, files: allFiles, savedAt: new Date().toISOString() };
+      const record = { type, files: allFiles, savedAt: new Date().toISOString(), ...(type === "lm" ? { businessDate: (typeof getNOL3TodayDate === "function" ? getNOL3TodayDate() : new Date().toISOString().slice(0,10)) } : {}) };
       if (dataset) {
         record.dataset = {
           fileName: dataset.fileName || allFiles.map(item => item.name).join(', '),
@@ -12021,7 +12423,28 @@ NOL3.pages.riders = function (root) {
       return NOL3.lmInventory;
     }
 
-    // No upload exists for this date: do not display another day's snapshot.
+    // For today's working dashboard, recover the last saved LM record when a
+    // dated history key is missing. The record remains local to this device/hub.
+    const today = (typeof getNOL3TodayDate === "function") ? getNOL3TodayDate() : new Date().toISOString().slice(0, 10);
+    if (date === today) {
+      try {
+        const savedLM = await get("lm");
+        if (savedLM?.dataset && Array.isArray(savedLM.dataset.rows) && savedLM.dataset.rows.length) {
+          const d = savedLM.dataset;
+          NOL3.lmInventory = {
+            files: fileMetaForRestore(savedLM.files),
+            fileName: d.fileName || (savedLM.files || []).map(f => f.name).filter(Boolean).join(", "),
+            headers: Array.isArray(d.headers) ? d.headers : [],
+            rows: d.rows, filteredRows: [], rowCount: d.rows.length,
+            loadedAt: d.loadedAt || savedLM.savedAt || new Date().toISOString(), rawText: ""
+          };
+          filterLMForHub(NOL3.lmInventory);
+          window.dispatchEvent(new CustomEvent("inventoryloaded", {detail:{type:"lm",fileName:NOL3.lmInventory.fileName,totalRows:NOL3.lmInventory.rows.length,businessDate:date,source:"device-storage"}}));
+          return NOL3.lmInventory;
+        }
+      } catch (error) { console.warn("NOL3: Could not recover current LM inventory from device storage.", error); }
+    }
+    // No saved upload for the selected historical date. Do not display a different day's snapshot.
     NOL3.lmInventory = { files: [], rows: [], filteredRows: [], fileName: "", headers: [], loadedAt: new Date().toISOString() };
     window.dispatchEvent(new CustomEvent("inventoryloaded", {
       detail: { type: "lm", fileName: "", totalRows: 0, businessDate: date, historical: true, empty: true }
@@ -12678,16 +13101,1570 @@ NOL3.pages.riders = function (root) {
 })();
 </script>
 
-<script id="nol3-standalone-startup">
-/* Standalone build: the cloud sync layer (Firebase / Supabase) was removed.
- * All data stays on this device (localStorage / IndexedDB). */
-window.addEventListener("load", function () {
-  try {
-    const today = typeof getNOL3TodayDate === "function" ? getNOL3TodayDate() : new Date().toISOString().slice(0,10);
-    NOL3.currentBusinessDate = today;
-    NOL3Storage.set("nol3_business_day_date_v1", today);
-  } catch (_) {}
-});
+<script>
+/* NOL3 Cloud Sync — Badoc Hub
+ * Firebase-primary sync with low-CPU/low-bandwidth polling.
+ * Simple device-to-device synchronization through Supabase.
+ * This intentionally uses the Supabase publishable key in the browser.
+ * Do not put a secret/service_role key here.
+ */
+(function () {
+  const SUPABASE_URL = "https://uduaxxwzpxwytekejito.supabase.co";
+  const initialHubCfg = NOL3.getSelectedHubConfig?.() || { id:3, name:"Badoc Hub", code:"BADOC" };
+  let HUB_ID = Number(initialHubCfg.id || 3);
+  let HUB_NAME = String(initialHubCfg.name || "Badoc Hub");
+  let HUB_CODE = String(initialHubCfg.code || "BADOC");
+  let DB_NAME = `NOL3_Planning_Dashboard_DB_${HUB_CODE}`;
+  const DB_VERSION = 4;
+  const STORE = "uploadedFiles";
+
+  // Three independent sync "channels", all sharing the same hub_data table
+  // (distinguished by data_type) but on different cadences/behavior:
+  //  - settings: tiny config (business date, hours, zone settings, planning
+  //    layout/town groups). Fast cadence. Never auto-cleared.
+  //  - roster: the riders file only. Small, persistent reference data. Fast
+  //    cadence. Never auto-cleared.
+  //  - files: the bulky day-to-day operational uploads (LM/incoming/linehaul
+  //    inventory, the unified-inventory snapshot and its undo copy). Large,
+  //    ephemeral. Slow cadence, and the ONLY data_type a cleanup job should
+  //    ever delete (see the pg_cron script — it targets data_type =
+  //    'app_state_files' specifically so it can never touch the other two).
+  let applyingRemote = false;
+  let META_KEY = `NOL3_CLOUD_LAST_APPLIED_${HUB_CODE}`;
+  // Local durability markers keep valid browser state from being overwritten
+  // by stale/empty cloud state during refresh.
+  let LOCAL_SETTINGS_DIRTY_KEY = `NOL3_LOCAL_SETTINGS_DIRTY_${HUB_CODE}`;
+  let LOCAL_ROSTER_DIRTY_KEY = `NOL3_LOCAL_ROSTER_DIRTY_${HUB_CODE}`;
+  let RIDER_CLEAR_INTENT_KEY = `NOL3_RIDER_CLEAR_INTENT_${HUB_CODE}`;
+  const markLocalDirty = key => { try { localStorage.setItem(key, String(Date.now())); } catch (_) {} };
+  const getLocalDirty = key => { try { return Number(localStorage.getItem(key) || 0); } catch (_) { return 0; } };
+  const clearLocalDirty = key => { try { localStorage.removeItem(key); } catch (_) {} };
+  const hasObjectKeys = value => !!(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length);
+  const hasArrayItems = value => Array.isArray(value) && value.length > 0;
+  const settingsHasMeaningfulData = state => !!(state && typeof state === "object" && (
+    state.businessDate || state.businessDaySettings || state.fleetProductivity ||
+    state.frozenTodayVolume || state.weeklyDailySummary || hasArrayItems(state.planningLayout) ||
+    hasArrayItems(state.planningExceptions) || hasArrayItems(state.zoneClusterRules) ||
+    hasObjectKeys(state.zoneOverrides) || hasObjectKeys(state.zoneSettings) || hasObjectKeys(state.fleetOverview)
+  ));
+
+  function makeChannel(config) {
+    return {
+      ...config,
+      lastHash: "",
+      lastRemoteUpdatedAt: 0,
+      lastLocalMutationAt: 0,
+      pushTimer: null,
+      syncing: false,
+      initialized: false
+    };
+  }
+
+  const settingsChannel = makeChannel({
+    dataType: "app_state",
+    metaKey: META_KEY,
+    pollMs: 5000,
+    debounceMs: 1200,
+    async buildSnapshot() {
+      return {
+        version: 1,
+        hubId: HUB_ID,
+        hubName: HUB_NAME,
+        hubCode: HUB_CODE,
+        clientUpdatedAt: settingsChannel.lastLocalMutationAt || Number(localStorage.getItem(META_KEY) || 0),
+        localState: getHubState()
+      };
+    },
+    async applyRemote(data) {
+      if (!data || !data.localState) return;
+      const localState = getHubState();
+      const remoteState = data.localState;
+      const score = state => {
+        if (!state || typeof state !== "object") return 0;
+        let n = 0;
+        if (state.businessDate) n += 1;
+        if (state.businessDaySettings) n += 2;
+        if (state.fleetProductivity) n += 1;
+        if (state.frozenTodayVolume) n += 1;
+        if (state.weeklyDailySummary) n += 1;
+        if (hasArrayItems(state.planningLayout)) n += 3;
+        if (hasArrayItems(state.planningExceptions)) n += 2;
+        if (hasArrayItems(state.zoneClusterRules)) n += 2;
+        if (hasObjectKeys(state.zoneOverrides)) n += 2;
+        if (hasObjectKeys(state.zoneSettings)) n += 2;
+        if (hasObjectKeys(state.fleetOverview)) n += 2;
+        return n;
+      };
+      // Settings have no user-facing "clear all" action. Never replace a
+      // populated local settings state with a materially emptier cloud copy.
+      if (settingsHasMeaningfulData(localState) && score(remoteState) < score(localState)) return;
+      applyHubState(remoteState);
+      // During startup, the final page render is done once after Settings and
+      // Riders have both been reconciled. Avoid rebuilding the Planning DOM
+      // three times while the database is still being read.
+      if (!window.__NOL3_CLOUD_STARTUP_SYNC) {
+        try { if (typeof NOL3.renderZoneClusterRules === "function") NOL3.renderZoneClusterRules(); } catch (_) {}
+        try { if (typeof NOL3.applyZoneClusterRules === "function") await NOL3.applyZoneClusterRules({ silent: true }); } catch (_) {}
+        try { if (typeof NOL3.refreshPlanningViews === "function") NOL3.refreshPlanningViews(); } catch (_) {}
+      } else {
+        try { if (typeof NOL3.applyZoneClusterRules === "function") await NOL3.applyZoneClusterRules({ silent: true }); } catch (_) {}
+      }
+    }
+  });
+
+  const rosterChannel = makeChannel({
+    dataType: "app_state_roster",
+    metaKey: "NOL3_CLOUD_LAST_APPLIED_BADOC_ROSTER",
+    pollMs: 5000,
+    debounceMs: 1200,
+    async buildSnapshot() {
+      const rider = window.NOL3?.riderData || null;
+      return {
+        version: 2,
+        hubId: HUB_ID,
+        hubName: HUB_NAME,
+        hubCode: HUB_CODE,
+        clientUpdatedAt: rosterChannel.lastLocalMutationAt || Number(localStorage.getItem(rosterChannel.metaKey) || 0),
+        riderData: rider ? {
+          fileName: rider.fileName || "",
+          headers: Array.isArray(rider.headers) ? rider.headers : [],
+          rows: Array.isArray(rider.rows) ? rider.rows : [],
+          rawText: typeof rider.rawText === "string" ? rider.rawText : "",
+          loadedAt: rider.loadedAt || ""
+        } : null
+      };
+    },
+    async applyRemote(data) {
+      if (!data) return;
+      const hub = (NOL3.getState && NOL3.getState().selectedHub) || HUB_NAME;
+      const localRoster = NOL3.riderData || window.NOL3RiderHubStore?.load?.(hub) || null;
+      const hasLocalRoster = !!(localRoster && ((Array.isArray(localRoster.rows) && localRoster.rows.length) || localRoster.fileName || localRoster.rawText));
+      const localDirtyAt = getLocalDirty(LOCAL_ROSTER_DIRTY_KEY);
+      let explicitClear = false;
+      try { explicitClear = localStorage.getItem(RIDER_CLEAR_INTENT_KEY) === "1"; } catch (_) {}
+
+      // Only an explicit Clear Rider Data action is allowed to honor a cloud
+      // rider tombstone. Operational CLEAR + refresh must never erase riders.
+      if (data.clearedByUser === true && !data.riderData) {
+        if (!explicitClear && hasLocalRoster) {
+          NOL3.riderData = localRoster;
+          window.NOL3RiderHubStore?.save?.(localRoster, hub);
+          markLocalDirty(LOCAL_ROSTER_DIRTY_KEY);
+          rosterChannel.lastLocalMutationAt = Math.max(localDirtyAt, Date.now());
+          setTimeout(() => { syncSettingsAndRoster(true).catch(() => {}); }, 0);
+          return;
+        }
+        if (explicitClear) clearLocalDirty(LOCAL_ROSTER_DIRTY_KEY);
+        try { localStorage.removeItem(RIDER_CLEAR_INTENT_KEY); } catch (_) {}
+        NOL3.riderData = null;
+        try { window.NOL3RiderHubStore?.clear?.(hub); } catch (_) {}
+        try { window.NOL3FileStore?.remove("riders"); } catch (_) {}
+        window.dispatchEvent(new CustomEvent("inventoryloaded", { detail: { type: "riders", source: "cloud" } }));
+        if (NOL3.state?.currentPage === "riders" && typeof NOL3.renderPage === "function") NOL3.renderPage("riders");
+        return;
+      }
+
+      if (!data.riderData) return;
+      const remoteDataAt = Number(data.clientUpdatedAt || 0);
+      // A newer local roster wins over a stale cloud copy.
+      if (hasLocalRoster && localDirtyAt && localDirtyAt >= remoteDataAt) {
+        NOL3.riderData = localRoster;
+        window.NOL3RiderHubStore?.save?.(localRoster, hub);
+        rosterChannel.lastLocalMutationAt = localDirtyAt;
+        setTimeout(() => { syncSettingsAndRoster(true).catch(() => {}); }, 0);
+        return;
+      }
+
+      NOL3.riderData = data.riderData;
+      window.NOL3RiderHubStore?.save?.(data.riderData, hub);
+      clearLocalDirty(LOCAL_ROSTER_DIRTY_KEY);
+      window.dispatchEvent(new CustomEvent("inventoryloaded", { detail: { type: "riders", source: "cloud" } }));
+      if (NOL3.state?.currentPage === "riders" && typeof NOL3.renderPage === "function") NOL3.renderPage("riders");
+    }
+
+  });
+
+  // NOTE: filesChannel is retained only for backwards-compatible state shape;
+  // no startup restore, polling, or upload push uses this channel.
+  const filesChannel = makeChannel({
+    dataType: "app_state_files",
+    metaKey: "NOL3_CLOUD_LAST_APPLIED_BADOC_FILES",
+    pollMs: 5000,
+    debounceMs: 3000,
+    async buildSnapshot() {
+      const lm = window.NOL3?.lmInventory || null;
+      const incoming = window.NOL3?.incomingInventory || null;
+      const linehaul = window.NOL3?.lineHaulInventory || null;
+      return {
+        version: 4,
+        hubId: HUB_ID,
+        hubName: HUB_NAME,
+        hubCode: HUB_CODE,
+        clientUpdatedAt: filesChannel.lastLocalMutationAt || Number(localStorage.getItem(filesChannel.metaKey) || 0),
+        lmInventory: lm ? {
+          fileName: lm.fileName || "",
+          files: Array.isArray(lm.files) ? lm.files : [],
+          headers: Array.isArray(lm.headers) ? lm.headers : [],
+          rows: Array.isArray(lm.rows) ? lm.rows : [],
+          filteredRows: Array.isArray(lm.filteredRows) ? lm.filteredRows : [],
+          rawText: typeof lm.rawText === "string" ? lm.rawText : "",
+          loadedAt: lm.loadedAt || ""
+        } : null,
+        incomingInventory: incoming ? {
+          fileName: incoming.fileName || "",
+          files: Array.isArray(incoming.files) ? incoming.files : [],
+          headers: Array.isArray(incoming.headers) ? incoming.headers : [],
+          rows: Array.isArray(incoming.rows) ? incoming.rows : [],
+          rawText: typeof incoming.rawText === "string" ? incoming.rawText : "",
+          loadedAt: incoming.loadedAt || ""
+        } : null,
+        // Incoming Orders are matched by SPX tracking number against the
+        // Incoming From-To / Linehaul export. Sync that second dataset too;
+        // without it another device has Incoming Inventory but cannot build
+        // the Incoming Orders list.
+        lineHaulInventory: linehaul ? {
+          fileName: linehaul.fileName || "",
+          files: Array.isArray(linehaul.files) ? linehaul.files : [],
+          headers: Array.isArray(linehaul.headers) ? linehaul.headers : [],
+          rows: Array.isArray(linehaul.rows) ? linehaul.rows : [],
+          rawText: typeof linehaul.rawText === "string" ? linehaul.rawText : "",
+          loadedAt: linehaul.loadedAt || ""
+        } : null,
+        arrivedIncomingTasks: (() => {
+          try {
+            const raw = NOL3Storage.get("nol3_incoming_arrived_tasks_v1");
+            const parsed = JSON.parse(raw || "[]");
+            return Array.isArray(parsed)
+              ? parsed.map(v => String(v || "").trim()).filter(Boolean)
+              : [];
+          } catch (_) { return []; }
+        })()
+      };
+    },
+    async applyRemote(data) {
+      if (!data) return;
+      filesChannel.lastRemoteClearedByUser = data.clearedByUser === true;
+
+      if (data.lmInventory) {
+        const lm = data.lmInventory;
+        NOL3.lmInventory = {
+          fileName: lm.fileName || "",
+          files: Array.isArray(lm.files) ? lm.files : [],
+          headers: Array.isArray(lm.headers) ? lm.headers : [],
+          rows: Array.isArray(lm.rows) ? lm.rows : [],
+          filteredRows: Array.isArray(lm.filteredRows) ? lm.filteredRows : [],
+          loadedAt: lm.loadedAt || new Date().toISOString(),
+          rowCount: Array.isArray(lm.rows) ? lm.rows.length : 0,
+          rawText: typeof lm.rawText === "string" ? lm.rawText : ""
+        };
+        if (typeof filterLMForHub === "function") filterLMForHub(NOL3.lmInventory);
+        // Older cloud rows carry filteredRows; new ones don't, so rebuild it.
+        NOL3.lmInventory.filteredRows = Array.isArray(lm.filteredRows) ? lm.filteredRows : deriveFilteredRows(NOL3.lmInventory);
+      }
+
+      if (data.incomingInventory) {
+        const incoming = data.incomingInventory;
+        NOL3.incomingInventory = {
+          fileName: incoming.fileName || "",
+          files: Array.isArray(incoming.files) ? incoming.files : [],
+          headers: Array.isArray(incoming.headers) ? incoming.headers : [],
+          rows: Array.isArray(incoming.rows) ? incoming.rows : [],
+          filteredRows: [],
+          loadedAt: incoming.loadedAt || new Date().toISOString(),
+          rowCount: Array.isArray(incoming.rows) ? incoming.rows.length : 0,
+          rawText: typeof incoming.rawText === "string" ? incoming.rawText : ""
+        };
+      }
+
+      if (data.lineHaulInventory) {
+        const linehaul = data.lineHaulInventory;
+        NOL3.lineHaulInventory = {
+          fileName: linehaul.fileName || "",
+          files: Array.isArray(linehaul.files) ? linehaul.files : [],
+          headers: Array.isArray(linehaul.headers) ? linehaul.headers : [],
+          rows: Array.isArray(linehaul.rows) ? linehaul.rows : [],
+          loadedAt: linehaul.loadedAt || new Date().toISOString(),
+          rowCount: Array.isArray(linehaul.rows) ? linehaul.rows.length : 0,
+          rawText: typeof linehaul.rawText === "string" ? linehaul.rawText : ""
+        };
+      }
+
+      // Confirmed Incoming Linehaul arrivals are part of the Planning
+      // calculation. Restore them together with inventory so Total Volume and
+      // Town counts match across devices.
+      if (Array.isArray(data.arrivedIncomingTasks)) {
+        try {
+          NOL3Storage.set(
+            "nol3_incoming_arrived_tasks_v1",
+            JSON.stringify(data.arrivedIncomingTasks)
+          );
+        } catch (_) {}
+      }
+
+      window.dispatchEvent(new CustomEvent("inventoryloaded", { detail: { type: "lm", source: "cloud" } }));
+      window.dispatchEvent(new CustomEvent("inventoryloaded", { detail: { type: "incoming", source: "cloud" } }));
+      window.dispatchEvent(new CustomEvent("inventoryloaded", { detail: { type: "linehaul", source: "cloud" } }));
+
+      try { if (typeof renderBusinessDayMetrics === "function") renderBusinessDayMetrics(); } catch (_) {}
+      try { if (typeof renderOnFloorTowns === "function") renderOnFloorTowns(); } catch (_) {}
+      try { if (typeof renderDeliveryAreas === "function") renderDeliveryAreas(); } catch (_) {}
+      try { if (typeof renderIncomingOrders === "function") renderIncomingOrders(); } catch (_) {}
+      try { if (typeof renderUnassignedOrders === "function") renderUnassignedOrders(); } catch (_) {}
+      try { if (typeof renderParcelRecords === "function") renderParcelRecords(); } catch (_) {}
+    }
+  });
+
+  const status = (text, good = null) => {
+    let el = document.getElementById("nol3CloudStatus");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "nol3CloudStatus";
+      el.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:99999;padding:8px 12px;border-radius:999px;background:#111827;color:#fff;font:600 12px/1.2 Arial,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.18);opacity:.92;pointer-events:none";
+      document.body.appendChild(el);
+    }
+    const rawStatus = String(text || "").toUpperCase();
+    let simpleStatus = "SYNC ISSUE";
+    if (rawStatus.includes("OFFLINE") || rawStatus.includes("DISCONNECTED") || rawStatus.includes("UNAVAILABLE")) {
+      simpleStatus = "OFFLINE";
+    } else if (rawStatus.includes("RETRY") || rawStatus.includes("ERROR") || rawStatus.includes("FAIL")) {
+      simpleStatus = "SYNC ISSUE";
+    } else if (rawStatus.includes("SYNCING") || rawStatus.includes("WORKING") || rawStatus.includes("PENDING")) {
+      simpleStatus = "SYNCING";
+    } else if (good === true && (rawStatus.includes("CONNECTED") || rawStatus.includes("LIVE") || rawStatus.includes("SYNCED"))) {
+      simpleStatus = "SYNCED";
+    } else if (rawStatus.includes("CONNECTED") && rawStatus.includes("LIVE")) {
+      simpleStatus = "SYNCED";
+    } else if (rawStatus.includes("CONNECT")) {
+      simpleStatus = "CONNECTING";
+    }
+    el.textContent = `${simpleStatus} • ${egressLabel()}`;
+    el.style.opacity = good === null ? ".92" : good ? "1" : ".78";
+  };
+
+  // Hardcoded so this device (and every future copy of this file) connects
+  // automatically with no key-entry prompt. This is a Supabase *publishable*
+  // key, which is safe to ship in client-side code by design (unlike a
+  // secret/service_role key) — it's the same key that was previously typed
+  // into the connect modal, just no longer requested at runtime.
+  const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_mECx0rqIkWPy_QjPqNIVrw_z3Mv9H_R";
+
+  const getSupabaseKey = () => SUPABASE_PUBLISHABLE_KEY;
+  // Firebase is the primary cloud. Supabase remains available only as a fallback.
+  // There is intentionally NO dual-write/mirror in this build.
+  // `configured()` stays true because Firebase does not require a browser API key.
+  const configured = () => !!SUPABASE_URL.startsWith("https://") && !!getSupabaseKey();
+
+  const api = async (path, options = {}) => {
+    const supabaseKey = getSupabaseKey();
+    if (!supabaseKey) throw new Error("Supabase publishable key has not been added yet.");
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+      ...options,
+      headers: {
+        apikey: supabaseKey,
+        "Content-Type": "application/json",
+        ...(options.headers || {})
+      }
+    });
+    const text = await response.text();
+    trackEgress(text.length);
+    if (!response.ok) throw new Error(`${response.status}: ${text || response.statusText}`);
+    return text ? JSON.parse(text) : null;
+  };
+
+  function readIndexedDB() {
+    return Promise.resolve(window.NOL3FileStore ? NOL3FileStore.getAll() : []);
+  }
+
+  function putIndexedDB(record) {
+    return Promise.resolve().then(() => {
+      if (window.NOL3FileStore && record && record.type) NOL3FileStore.put(record);
+    });
+  }
+
+  function parseObject(raw, fallback) {
+    try {
+      const parsed = JSON.parse(raw || "");
+      return parsed && typeof parsed === "object" ? parsed : fallback;
+    } catch (_) { return fallback; }
+  }
+
+  function getHubState() {
+    const hub = HUB_NAME;
+    const layoutStore = parseObject(NOL3Storage.get("nol3_planning_layout_v1"), {});
+    const exceptionStore = parseObject(NOL3Storage.get("nol3_planning_exceptions_v1:" + hub), []);
+    const overrideStore = parseObject(NOL3Storage.get("nol3_zone_id_overrides_v1"), {});
+    const zoneSettingsStore = parseObject(NOL3Storage.get("nol3_zone_settings_v1"), {});
+    const businessSettingsStore = parseObject(NOL3Storage.get("nol3_business_day_settings_v1"), {});
+    const planningByHub = layoutStore?.byHub && typeof layoutStore.byHub === "object" ? layoutStore.byHub : layoutStore;
+    const currentBusinessSettings = businessSettingsStore?.[hub] && typeof businessSettingsStore[hub] === "object"
+      ? businessSettingsStore[hub]
+      : {};
+
+    return {
+      businessDate: NOL3Storage.get("nol3_business_day_date_v1") || "",
+      // Each cloud row belongs to one hub. Send only this hub's business-day
+      // settings so changing hubs can never overwrite another hub's COT/start.
+      businessDaySettings: JSON.stringify(currentBusinessSettings),
+      planningLayout: planningByHub?.[hub] || null,
+      fleetProductivity: NOL3Storage.get("nol3_fleet_productivity_v1:" + hub) || (hub === NOL3_DEFAULT_HUB_NAME ? NOL3Storage.get("nol3_fleet_productivity_v1") : "") || "",
+      planningExceptions: exceptionStore,
+      zoneOverrides: overrideStore[hub] || {},
+      zoneSettings: zoneSettingsStore[hub] || {},
+      zoneClusterRules: NOL3.getZoneClusterRules ? NOL3.getZoneClusterRules() : [],
+      frozenTodayVolume: NOL3Storage.get(`nol3_frozen_today_volume_v1:${HUB_CODE}`) || (hub === NOL3_DEFAULT_HUB_NAME ? NOL3Storage.get("nol3_frozen_today_volume_v1") : "") || "",
+      weeklyDailySummary: NOL3Storage.get(`NOL3_WEEKLY_DAILY_SUMMARY_${hub}`) || "",
+      fleetOverview: parseObject(NOL3Storage.get("nol3_fleet_overview_v1:" + hub), {})
+    };
+  }
+
+  function applyHubState(state) {
+    if (!state || typeof state !== "object") return;
+    applyingRemote = true;
+    try {
+      if (state.businessDate) NOL3Storage.set("nol3_business_day_date_v1", String(state.businessDate));
+      if (state.businessDaySettings) {
+        const store = parseObject(NOL3Storage.get("nol3_business_day_settings_v1"), {});
+        let payload = parseObject(String(state.businessDaySettings), null);
+        if (payload && payload[HUB_NAME] && typeof payload[HUB_NAME] === "object") payload = payload[HUB_NAME];
+        if (payload && typeof payload === "object") {
+          store[HUB_NAME] = payload;
+          NOL3Storage.set("nol3_business_day_settings_v1", JSON.stringify(store));
+        }
+      }
+      if (state.fleetOverview && typeof state.fleetOverview === "object") {
+        NOL3Storage.set("nol3_fleet_overview_v1:" + HUB_NAME, JSON.stringify(state.fleetOverview));
+      }
+      if (state.fleetProductivity !== undefined && state.fleetProductivity !== "") {
+        NOL3Storage.set("nol3_fleet_productivity_v1:" + HUB_NAME, String(state.fleetProductivity));
+      }
+      if (Array.isArray(state.planningExceptions)) {
+        NOL3Storage.set("nol3_planning_exceptions_v1:" + HUB_NAME, JSON.stringify(state.planningExceptions));
+      }
+      // Apply the cloud planning layout to BOTH local storage and the live
+      // in-memory Delivery Areas collection. This is important when the cloud
+      // legitimately sends an empty layout: localStorage can be empty while
+      // NOL3.deliveryAreas still contains an old in-memory area, which would
+      // otherwise keep rendering after a delete/refresh cycle.
+      if (Array.isArray(state.planningLayout)) {
+        const store = parseObject(NOL3Storage.get("nol3_planning_layout_v1"), {});
+        const byHub = store?.byHub && typeof store.byHub === "object"
+          ? store.byHub
+          : (Array.isArray(store) ? { __NO_HUB__: store } : store);
+        const normalized = {
+          version: 2,
+          byHub: { ...(byHub || {}) }
+        };
+        normalized.byHub[HUB_NAME] = state.planningLayout;
+        NOL3Storage.set("nol3_planning_layout_v1", JSON.stringify(normalized));
+
+        const restoredAreas = state.planningLayout.map(savedArea => ({
+          id: String(savedArea?.id || `area-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
+          title: String(savedArea?.title || "Delivery Area"),
+          collapsed: !!savedArea?.collapsed,
+          towns: Array.isArray(savedArea?.towns) ? [...savedArea.towns] : [],
+          groups: Array.isArray(savedArea?.groups) && savedArea.groups.length
+            ? savedArea.groups.map(group => ({
+                id: String(group?.id || `group-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
+                title: String(group?.title || "Town Group"),
+                towns: Array.isArray(group?.towns) ? [...group.towns] : [],
+                assignedRiders: Array.isArray(group?.assignedRiders) ? [...group.assignedRiders] : []
+              }))
+            : [{
+                id: `group-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                title: "Town Group",
+                towns: Array.isArray(savedArea?.towns) ? [...savedArea.towns] : [],
+                assignedRiders: []
+              }]
+        }));
+        restoredAreas.forEach(area => {
+          area.towns = area.groups.flatMap(group => group.towns);
+        });
+        NOL3.deliveryAreas = restoredAreas;
+      }
+      if (state.zoneOverrides && typeof state.zoneOverrides === "object") {
+        const store = parseObject(NOL3Storage.get("nol3_zone_id_overrides_v1"), {});
+        store[HUB_NAME] = state.zoneOverrides;
+        NOL3Storage.set("nol3_zone_id_overrides_v1", JSON.stringify(store));
+      }
+      if (state.zoneSettings && typeof state.zoneSettings === "object") {
+        const store = parseObject(NOL3Storage.get("nol3_zone_settings_v1"), {});
+        store[HUB_NAME] = state.zoneSettings;
+        NOL3Storage.set("nol3_zone_settings_v1", JSON.stringify(store));
+      }
+      // Restore Zone Clustering rules from the cloud before re-rendering
+      // Planning. An empty array is intentional and means all saved local
+      // clustering rules were cleared on another device.
+      if (Array.isArray(state.zoneClusterRules)) {
+        const store = parseObject(NOL3Storage.get("nol3_zone_cluster_rules_v1"), {});
+        store[HUB_NAME] = state.zoneClusterRules;
+        NOL3Storage.set("nol3_zone_cluster_rules_v1", JSON.stringify(store));
+      }
+      if (state.weeklyDailySummary) {
+        NOL3Storage.set(`NOL3_WEEKLY_DAILY_SUMMARY_${HUB_NAME}`, String(state.weeklyDailySummary));
+      }
+      if (state.frozenTodayVolume) {
+        NOL3Storage.set(`nol3_frozen_today_volume_v1:${HUB_CODE}`, String(state.frozenTodayVolume));
+      }
+    } finally {
+      applyingRemote = false;
+    }
+  }
+
+  function stableHash(value) {
+    try { return JSON.stringify(value); } catch (_) { return String(Date.now()); }
+  }
+
+  // ===== PROVIDER SWITCH =====
+  // Firebase Realtime Database is the PRIMARY cloud for Badoc Hub.
+  // Supabase is used ONLY as a fallback if Firebase becomes unavailable.
+  // There is NO mirror / dual-write. While Firebase is healthy, Supabase is
+  // not written to by this page.
+  //
+  // cloud-config.json (next to the hub page on GitHub):
+  //   {
+  //     "provider": "firebase",
+  //     "firebaseUrl": "https://<db>.firebasedatabase.app",
+  //     "mirror": false,
+  //     "fallbackProvider": "supabase"
+  //   }
+  // Firebase failures temporarily switch this device to Supabase for 6 hours.
+  // After the failover window expires, the page automatically tries Firebase
+  // again.
+  const CFG_KEY = "NOL3_CLOUD_CFG";
+  let FAILOVER_KEY = `NOL3_CLOUD_FAILOVER_${HUB_CODE}`;
+  const FAILOVER_MS = 5 * 60 * 1000;
+  const FIREBASE_TIMEOUT_MS = 8000;
+  const DEFAULT_FIREBASE_URL = "https://nol3-backup-default-rtdb.asia-southeast1.firebasedatabase.app";
+  const EMBEDDED_CLOUD_CFG = {
+    provider: "firebase",
+    firebaseUrl: DEFAULT_FIREBASE_URL,
+    mirror: false,
+    fallbackProvider: "supabase",
+    hubs: {}
+  };
+  // Never let an old file:// localStorage setting override this build's
+  // embedded provider configuration. GitHub/HTTPS may override it from
+  // cloud-config.json below.
+  let cloudCfg = { ...EMBEDDED_CLOUD_CFG };
+  let cfgLoadedAt = 0;
+  let lastActive = "";
+
+  function wantedProvider() {
+    return String((cloudCfg.hubs && cloudCfg.hubs[HUB_CODE]) || cloudCfg.provider || "firebase").toLowerCase();
+  }
+  function fallbackProvider() {
+    return String(cloudCfg.fallbackProvider || "supabase").toLowerCase() === "firebase" ? "supabase" : "supabase";
+  }
+  function activeProvider() {
+    try {
+      const failUntil = Number(localStorage.getItem(FAILOVER_KEY) || 0);
+      if (Date.now() < failUntil) return fallbackProvider();
+      if (wantedProvider() === "supabase") return "supabase";
+      if (wantedProvider() === "firebase" && cloudCfg.firebaseUrl) return "firebase";
+    } catch (_) {}
+    return "supabase";
+  }
+  function mirrorName() {
+    // Deliberately disabled: Firebase is primary and Supabase is fallback-only.
+    return null;
+  }
+  function activateSupabaseFallback(error) {
+    try {
+      localStorage.setItem(FAILOVER_KEY, String(Date.now() + FAILOVER_MS));
+    } catch (_) {}
+    invalidateStamps();
+    lastActive = "supabase";
+    console.warn("NOL3 cloud: Firebase unavailable; switching to Supabase fallback", error);
+    try { status("FIREBASE FAILED • SUPABASE BACKUP", false); } catch (_) {}
+  }
+
+  async function runCloudBackend(method, ...args) {
+    const provider = activeProvider();
+    try {
+      return await backendFor(provider)[method](...args);
+    } catch (error) {
+      if (provider === "firebase") {
+        activateSupabaseFallback(error);
+        return await backendFor("supabase")[method](...args);
+      }
+      throw error;
+    }
+  }
+
+  const sbRaw = {
+    async readStamps() {
+      const rows = await api(`hub_data?hub_id=eq.${HUB_ID}&select=data_type,updated_at`);
+      const map = {};
+      (Array.isArray(rows) ? rows : []).forEach(r => { map[r.data_type] = Date.parse(r.updated_at) || 0; });
+      return map;
+    },
+    async readRow(dataType) {
+      const rows = await api(`hub_data?hub_id=eq.${HUB_ID}&data_type=eq.${encodeURIComponent(dataType)}&select=data,updated_at&limit=1`);
+      return Array.isArray(rows) && rows.length ? rows[0] : null;
+    },
+    async writeRow(dataType, data, updatedAt) {
+      await api(`hub_data?on_conflict=hub_id,data_type`, {
+        method: "POST",
+        headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify({ hub_id: HUB_ID, data_type: dataType, data, updated_at: updatedAt })
+      });
+    }
+  };
+
+  // Firebase layout:
+  //   hub_stamps/<hub>/<type> = updated_at (tiny metadata, polled)
+  //   hub_data/<hub>/<type>   = { json: "<stringified data>", updated_at }
+  // The polling path is intentionally tiny. NEVER read hub_data/<hub>.json as
+  // a stamp map because that downloads every large snapshot on every poll.
+  const fbBase = () => String(cloudCfg.firebaseUrl || DEFAULT_FIREBASE_URL).replace(/\/+$/, "");
+  async function fbFetch(path, options = {}) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FIREBASE_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${fbBase()}/${path}`, { ...options, signal: controller.signal });
+      const text = await response.text();
+      trackEgress(text.length);
+      if (!response.ok) throw new Error(`Firebase ${response.status}: ${text || response.statusText}`);
+      return text ? JSON.parse(text) : null;
+    } catch (error) {
+      if (error?.name === "AbortError") throw new Error(`Firebase timeout after ${FIREBASE_TIMEOUT_MS / 1000}s`);
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  const fbRaw = {
+    async readStamps() {
+      // Tiny request: only timestamps, never the large snapshots.
+      const obj = await fbFetch(`hub_stamps/${HUB_ID}.json`);
+      const map = {};
+      Object.keys(obj || {}).forEach(k => { map[k] = Date.parse(obj[k]) || 0; });
+      return map;
+    },
+    async readRow(dataType) {
+      const row = await fbFetch(`hub_data/${HUB_ID}/${encodeURIComponent(dataType)}.json`);
+      if (!row || typeof row.json !== "string") return null;
+      return { data: JSON.parse(row.json), updated_at: row.updated_at };
+    },
+    async writeRow(dataType, data, updatedAt) {
+      // One write updates the data row plus its tiny timestamp marker.
+      await fbFetch(`.json?print=silent`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          [`hub_data/${HUB_ID}/${encodeURIComponent(dataType)}`]: { json: JSON.stringify(data), updated_at: updatedAt },
+          [`hub_stamps/${HUB_ID}/${encodeURIComponent(dataType)}`]: updatedAt
+        })
+      });
+    }
+  };
+
+  function noteBackendError(name, error) {
+    // Kept for compatibility with the backend wrappers. Actual fallback is
+    // handled by runCloudBackend(), which retries the same operation on
+    // Supabase after ANY Firebase request failure.
+    if (name === "firebase") activateSupabaseFallback(error);
+  }
+  function wrapBackend(name, raw) {
+    const out = {};
+    ["readStamps", "readRow", "writeRow"].forEach(k => {
+      out[k] = async (...args) => {
+        try { return await raw[k](...args); } catch (e) { noteBackendError(name, e); throw e; }
+      };
+    });
+    return out;
+  }
+  const BACKENDS = { supabase: wrapBackend("supabase", sbRaw), firebase: wrapBackend("firebase", fbRaw) };
+  const backendFor = name => BACKENDS[name] || BACKENDS.supabase;
+  const activeBackend = () => backendFor(activeProvider());
+
+  async function writeRowEverywhere(dataType, data, updatedAt) {
+    // Despite the legacy function name, this is now a SINGLE-write operation.
+    // It writes to Firebase while healthy, or Supabase after Firebase failover.
+    await runCloudBackend("writeRow", dataType, data, updatedAt);
+  }
+
+  // Direct Firebase writer for uploaded operational files. This bypasses the
+  // older channel state machine so a successful file import is committed
+  // immediately even when a prior cloud poll/restore failed.
+  async function writeFilesDirectToFirebase(data, updatedAt) {
+    const encodedType = encodeURIComponent(filesChannel.dataType);
+    const payload = {
+      json: JSON.stringify(data),
+      updated_at: updatedAt
+    };
+    await fbFetch(`.json?print=silent`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        [`hub_data/${HUB_ID}/${encodedType}`]: payload,
+        [`hub_stamps/${HUB_ID}/${encodedType}`]: updatedAt
+      })
+    });
+  }
+
+  // Operational uploaded files (LM / Incoming / Linehaul) are LOCAL-ONLY.
+  // SPX/FMS bridge auto-sync is the source of truth for operational uploads.
+  // Settings and rider roster continue to use the cloud sync channel.
+  async function backfillMirror() { return; }
+
+  async function loadCloudConfig() {
+    // Start from the embedded Firebase-primary configuration every time.
+    // On GitHub/HTTPS, cloud-config.json can explicitly switch the provider.
+    // We intentionally do NOT persist provider config in localStorage because
+    // that caused stale file:// settings to override the current build.
+    cloudCfg = { ...EMBEDDED_CLOUD_CFG };
+    try {
+      if (location.protocol !== "file:") {
+        const r = await fetch(`cloud-config.json?t=${Math.floor(Date.now() / 300000)}`, { cache: "no-store" });
+        if (r.ok) {
+          const j = await r.json();
+          if (j && typeof j === "object") {
+            cloudCfg = { ...EMBEDDED_CLOUD_CFG, ...j, mirror: false, fallbackProvider: "supabase" };
+          }
+        }
+      }
+    } catch (error) {
+      console.warn("NOL3 cloud: config fetch failed; using embedded Firebase config", error);
+    }
+    // A new Firebase-primary page should not inherit an old 6-hour failover
+    // flag from a previous broken build. Actual failures will set a fresh
+    // short failover window below.
+    try { localStorage.removeItem(FAILOVER_KEY); } catch (_) {}
+    cfgLoadedAt = Date.now();
+    const now = activeProvider();
+    if (lastActive && now !== lastActive) invalidateStamps();
+    lastActive = now;
+    status(`PRIMARY • ${now.toUpperCase()}`, true);
+  }
+  async function refreshCloudConfigIfDue() {
+    if (Date.now() - cfgLoadedAt > 300000) await loadCloudConfig();
+  }
+  // ===== /PROVIDER SWITCH =====
+
+  // ===== EGRESS GUARD =====
+  // Firebase polls read only the tiny hub_stamps map; large snapshots are
+  // downloaded only when their timestamp changes.
+  // 1) Polls ask the active backend only for updated_at (bytes); the big
+  //    `data` column is downloaded only when updated_at actually changed.
+  // 2) One tiny request covers all three channels.
+  // 3) No polling while the tab is hidden; slower when nobody is touching it.
+  // 4) A device never re-downloads a snapshot it just pushed itself.
+  const POLL_ACTIVE_MS = 180000;  // every 3 min while active
+  const POLL_IDLE_MS = 600000;    // every 10 min while idle
+  const IDLE_AFTER_MS = 300000;
+  let lastActivityAt = Date.now();
+  ["pointerdown", "keydown", "touchstart"].forEach(ev =>
+    window.addEventListener(ev, () => { lastActivityAt = Date.now(); }, { passive: true, capture: true }));
+
+  let EGRESS_KEY = `NOL3_CLOUD_EGRESS_${HUB_CODE}`;
+  function readEgress() {
+    const day = new Date().toISOString().slice(0, 10);
+    try {
+      const raw = JSON.parse(localStorage.getItem(EGRESS_KEY) || "{}");
+      return raw.day === day ? raw : { day, bytes: 0, requests: 0 };
+    } catch (_) { return { day, bytes: 0, requests: 0 }; }
+  }
+  function trackEgress(chars) {
+    try {
+      const u = readEgress();
+      u.bytes += chars; u.requests += 1;
+      localStorage.setItem(EGRESS_KEY, JSON.stringify(u));
+    } catch (_) {}
+  }
+  function egressLabel() {
+    const u = readEgress();
+    // Keep the cloud status provider-neutral; do not expose Firebase in the UI.
+    return u.bytes ? `↓ ${(u.bytes / 1048576).toFixed(u.bytes < 10485760 ? 2 : 1)} MB used` : "↓ 0 MB used";
+  }
+
+  let stampsCache = { at: 0, promise: null };
+  function invalidateStamps() { stampsCache = { at: 0, promise: null }; }
+  function getRemoteStamps(force) {
+    const now = Date.now();
+    if (!force && stampsCache.promise && now - stampsCache.at < 4000) return stampsCache.promise;
+    const p = runCloudBackend("readStamps");
+    stampsCache = { at: now, promise: p };
+    p.catch(() => { if (stampsCache.promise === p) invalidateStamps(); });
+    return p;
+  }
+
+  async function pollCycle() {
+    if (document.hidden) return;
+    window.__NOL3_LAST_CLOUD_POLL = Date.now();
+    await refreshCloudConfigIfDue();
+    await syncSettingsAndRoster();
+  }
+  function startAdaptivePolling() {
+    const loop = () => {
+      const idle = Date.now() - lastActivityAt > IDLE_AFTER_MS;
+      setTimeout(async () => {
+        try { await pollCycle(); } catch (_) {}
+        loop();
+      }, idle ? POLL_IDLE_MS : POLL_ACTIVE_MS);
+    };
+    loop();
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) {
+        lastActivityAt = Date.now();
+        const since = Date.now() - (window.__NOL3_LAST_CLOUD_POLL || 0);
+        if (since > 30000) pollCycle().catch(() => {});
+      }
+    });
+  }
+  // ===== /EGRESS GUARD =====
+
+  // ===== PAYLOAD SLIM =====
+  // The files snapshot used to carry the same rows 3x (rows + rawText +
+  // filteredRows). Receivers never read rawText after a cloud restore and
+  // rebuild filteredRows themselves, so neither is uploaded any more. What is
+  // left is gzip-compressed (base64 inside the existing jsonb column).
+  // Old uncompressed rows are still read fine.
+  function slimFilesSnapshot(s) {
+    if (!s || typeof s !== "object") return s;
+    const out = { ...s };
+    for (const k of ["lmInventory", "incomingInventory", "lineHaulInventory"]) {
+      const v = out[k];
+      if (!v || typeof v !== "object") continue;
+      const c = { ...v };
+      delete c.filteredRows;
+      c.rawText = "";
+      if (Array.isArray(c.files)) c.files = c.files.map(f => (f && typeof f === "object") ? { name: f.name, lastModified: f.lastModified || 0 } : f);
+      out[k] = c;
+    }
+    return out;
+  }
+
+  function deriveFilteredRows(inv) {
+    const rows = Array.isArray(inv?.rows) ? inv.rows : [];
+    const headers = Array.isArray(inv?.headers) ? inv.headers : [];
+    if (!rows.length) return [];
+    try {
+      if (typeof NOL3.filterRowsToHub === "function") {
+        return NOL3.filterRowsToHub(headers, rows, "auto").rows;
+      }
+    } catch (_) {}
+    const hub = String((NOL3.getState && NOL3.getState().selectedHub) || HUB_NAME).trim().toLowerCase();
+    if (!hub) return rows.slice();
+    const hs = headers.map(h => String(h || "").trim().toLowerCase());
+    const ci = hs.indexOf("current station"), di = hs.indexOf("destination station");
+    if (ci < 0 && di < 0) return rows.slice();
+    return rows.filter(r =>
+      (ci >= 0 && String(r?.[ci] ?? "").trim().toLowerCase() === hub) ||
+      (di >= 0 && String(r?.[di] ?? "").trim().toLowerCase() === hub)
+    );
+  }
+
+  async function packSnapshot(obj) {
+    const json = JSON.stringify(obj);
+    const stream = new Blob([json]).stream().pipeThrough(new CompressionStream("gzip"));
+    const buf = new Uint8Array(await new Response(stream).arrayBuffer());
+    let bin = "";
+    for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+    return { z: 1, clientUpdatedAt: obj.clientUpdatedAt || 0, clearedByUser: obj.clearedByUser === true, gz: btoa(bin) };
+  }
+
+  async function unpackSnapshot(data) {
+    if (!data || data.z !== 1 || typeof data.gz !== "string") return data;   // legacy plain row
+    const bin = atob(data.gz);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+    return JSON.parse(await new Response(stream).text());
+  }
+
+  async function encodeForUpload(channel, data) {
+    if (channel === filesChannel) data = slimFilesSnapshot(data);
+    if (channel !== settingsChannel && typeof CompressionStream === "function") {
+      try { return await packSnapshot(data); } catch (e) { console.warn("NOL3 cloud: compression failed, sending plain", e); }
+    }
+    return data;
+  }
+  // ===== /PAYLOAD SLIM =====
+
+  function isSelectedHubCloudIdVerified() {
+    try { return NOL3.getSelectedHubConfig?.()?.cloudIdVerified === true; }
+    catch (_) { return false; }
+  }
+
+  async function readRemoteFor(channel) {
+    if (!isSelectedHubCloudIdVerified()) return null;
+    const row = await runCloudBackend("readRow", channel.dataType);
+    if (row && row.data) row.data = await unpackSnapshot(row.data);
+    return row;
+  }
+
+  // Postgres/Supabase's jsonb columns reject the \u0000 (NUL) escape sequence
+  // outright ("unsupported Unicode escape sequence", code 22P05). If any
+  // stored data (e.g. a file read as text before the NUL-stripping fix, or
+  // anything else) still contains a literal NUL character, JSON.stringify
+  // will emit \u0000 for it and Supabase will reject the whole push. Strip
+  // NULs recursively right before sending as a defensive backstop.
+  function stripNulCharacters(value) {
+    if (typeof value === "string") return value.replace(/\u0000/g, "");
+    if (Array.isArray(value)) return value.map(stripNulCharacters);
+    if (value && typeof value === "object") {
+      const out = {};
+      for (const key of Object.keys(value)) out[key] = stripNulCharacters(value[key]);
+      return out;
+    }
+    return value;
+  }
+
+  async function pushSnapshotFor(channel, snapshot) {
+    if (!isSelectedHubCloudIdVerified()) {
+      throw new Error(`Cloud sync paused: ${HUB_NAME} has no verified production hub ID. Local per-hub settings are preserved.`);
+    }
+    // Firebase is the primary backend. Avoid recursively cloning/string-cleaning
+    // the full operational file snapshot on the main thread; Supabase fallback
+    // performs NUL cleanup only when it is actually needed.
+    const payload = {
+      hub_id: HUB_ID,
+      data_type: channel.dataType,
+      data: await encodeForUpload(channel, snapshot),
+      updated_at: new Date().toISOString()
+    };
+    try {
+      await writeRowEverywhere(payload.data_type, payload.data, payload.updated_at);
+    } catch (error) {
+      // Last-resort Supabase fallback with defensive cleanup.
+      if (activeProvider() === "firebase") {
+        const cleaned = stripNulCharacters(snapshot);
+        const encoded = await encodeForUpload(channel, cleaned);
+        await backendFor("supabase").writeRow(payload.data_type, encoded, payload.updated_at);
+      } else {
+        throw error;
+      }
+    }
+    channel.lastStamp = Date.parse(payload.updated_at) || Date.now();
+    invalidateStamps();
+  }
+
+  function applyCloudHubContext() {
+    const cfg = NOL3.getSelectedHubConfig?.() || { id:3, name:"Badoc Hub", code:"BADOC" };
+    HUB_ID = Number(cfg.id || 3);
+    HUB_NAME = String(cfg.name || "Badoc Hub");
+    HUB_CODE = String(cfg.code || "BADOC");
+    DB_NAME = `NOL3_Planning_Dashboard_DB_${HUB_CODE}`;
+    META_KEY = `NOL3_CLOUD_LAST_APPLIED_${HUB_CODE}`;
+    LOCAL_SETTINGS_DIRTY_KEY = `NOL3_LOCAL_SETTINGS_DIRTY_${HUB_CODE}`;
+    LOCAL_ROSTER_DIRTY_KEY = `NOL3_LOCAL_ROSTER_DIRTY_${HUB_CODE}`;
+    RIDER_CLEAR_INTENT_KEY = `NOL3_RIDER_CLEAR_INTENT_${HUB_CODE}`;
+    FAILOVER_KEY = `NOL3_CLOUD_FAILOVER_${HUB_CODE}`;
+    EGRESS_KEY = `NOL3_CLOUD_EGRESS_${HUB_CODE}`;
+    settingsChannel.metaKey = META_KEY;
+    rosterChannel.metaKey = `NOL3_CLOUD_LAST_APPLIED_${HUB_CODE}_ROSTER`;
+    filesChannel.metaKey = `NOL3_CLOUD_LAST_APPLIED_${HUB_CODE}_FILES`;
+    [settingsChannel, rosterChannel, filesChannel].forEach(ch => {
+      ch.initialized = false;
+      ch.lastStamp = 0;
+      ch.lastRemoteUpdatedAt = 0;
+      ch.lastLocalMutationAt = 0;
+      ch.lastHash = "";
+      if (ch.pushTimer) { clearTimeout(ch.pushTimer); ch.pushTimer = null; }
+    });
+    try { localStorage.removeItem(FAILOVER_KEY); } catch (_) {}
+    try { invalidateStamps(); } catch (_) {}
+  }
+
+  window.addEventListener("hubchange", () => {
+    try { applyCloudHubContext(); } catch (error) { console.warn("NOL3: cloud hub context switch failed", error); }
+    // Pull the newly selected hub's Settings + Riders instead of pushing the
+    // previous hub's state into the new hub's cloud row.
+    setTimeout(async () => {
+      try {
+        await loadCloudConfig();
+        await initialSyncChannel(settingsChannel);
+        await initialSyncChannel(rosterChannel);
+        if (typeof NOL3.renderPage === "function") NOL3.renderPage(NOL3.getState()?.currentPage || "planning");
+      } catch (error) { console.warn("NOL3: selected hub cloud restore failed", error); }
+    }, 0);
+  });
+
+  async function restoreIndexedDB(records) {
+    if (!Array.isArray(records)) return;
+    const restoredTypes = new Set();
+    for (const record of records) {
+      // Rider rosters are hub-scoped and restored only through the dedicated
+      // roster channel / NOL3RiderHubStore. Never restore the legacy generic
+      // IndexedDB `riders` record.
+      if (!record || record.type === "riders") continue;
+      if (record.type) {
+        await putIndexedDB(record);
+        restoredTypes.add(record.type);
+      }
+    }
+    if (restoredTypes.has("riders")) {
+      window.dispatchEvent(new CustomEvent("inventoryloaded", { detail: { type: "riders", data: NOL3FileStore.get("riders") } }));
+    }
+    if (restoredTypes.has("unifiedInventory")) {
+      const rec = NOL3FileStore.get("unifiedInventory");
+      if (rec?.dataset) {
+        NOL3.lmInventory = {
+          files: rec.files || [],
+          fileName: rec.dataset.fileName || "",
+          headers: rec.dataset.headers || [],
+          rows: rec.dataset.lmRows || [],
+          filteredRows: [],
+          loadedAt: rec.dataset.loadedAt || "",
+          rowCount: Array.isArray(rec.dataset.lmRows) ? rec.dataset.lmRows.length : 0
+        };
+        NOL3.incomingInventory = {
+          files: rec.files || [],
+          fileName: rec.dataset.fileName || "",
+          headers: rec.dataset.headers || [],
+          rows: rec.dataset.incomingRows || [],
+          filteredRows: [],
+          rawText: rec.dataset.rawText || "",
+          loadedAt: rec.dataset.loadedAt || "",
+          rowCount: Array.isArray(rec.dataset.incomingRows) ? rec.dataset.incomingRows.length : 0
+        };
+        try { if (typeof filterLMForHub === "function") filterLMForHub(NOL3.lmInventory); } catch (_) {}
+        window.dispatchEvent(new CustomEvent("inventoryloaded", { detail: { type: "lm", data: NOL3.lmInventory } }));
+        window.dispatchEvent(new CustomEvent("inventoryloaded", { detail: { type: "incoming", data: NOL3.incomingInventory } }));
+        window.dispatchEvent(new CustomEvent("unifiedinventoryloaded", { detail: { fileName: rec.dataset.fileName || "", rowCount: Array.isArray(rec.dataset.rows) ? rec.dataset.rows.length : 0 } }));
+      }
+    }
+  }
+
+  function snapshotHasData(channel, snapshot) {
+    try {
+      if (!snapshot) return false;
+      if (channel === rosterChannel) {
+        const r = snapshot.riderData;
+        return !!(r && ((Array.isArray(r.rows) && r.rows.length) || r.fileName || r.rawText));
+      }
+      if (channel === filesChannel) {
+        const has = v => !!(v && ((Array.isArray(v.rows) && v.rows.length) || v.fileName || v.rawText));
+        return has(snapshot.lmInventory) || has(snapshot.incomingInventory) || has(snapshot.lineHaulInventory);
+      }
+      return !!snapshot.localState;
+    } catch (_) { return false; }
+  }
+
+  function mergeFilesSnapshotPreservingRemote(local, remote) {
+    if (!local || !remote) return local;
+    const has = v => !!(v && ((Array.isArray(v.rows) && v.rows.length) || v.fileName || v.rawText));
+    const merged = { ...local };
+    for (const key of ["lmInventory", "incomingInventory", "lineHaulInventory"]) {
+      if (!has(local[key]) && has(remote[key])) merged[key] = remote[key];
+    }
+    if ((!Array.isArray(local.arrivedIncomingTasks) || local.arrivedIncomingTasks.length === 0) &&
+        Array.isArray(remote.arrivedIncomingTasks) && remote.arrivedIncomingTasks.length) {
+      merged.arrivedIncomingTasks = remote.arrivedIncomingTasks;
+    }
+    return merged;
+  }
+
+  function startupFingerprint(channel, snap) {
+    if (channel === filesChannel) {
+      const counts = [
+        snap?.lmInventory?.rows?.length || 0,
+        snap?.incomingInventory?.rows?.length || 0,
+        snap?.lineHaulInventory?.rows?.length || 0
+      ];
+      return `startup-files:${counts.join(":")}:${snap?.lmInventory?.fileName || ""}:${snap?.incomingInventory?.fileName || ""}:${snap?.lineHaulInventory?.fileName || ""}`;
+    }
+    return stableHash(snap);
+  }
+
+  async function initialSyncChannel(channel) {
+    if (!isSelectedHubCloudIdVerified()) {
+      channel.initialized = true;
+      channel.lastHash = "";
+      channel.lastStamp = 0;
+      console.info(`NOL3 startup: ${HUB_NAME} is local-only until its production hub ID is verified`);
+      return false;
+    }
+    let startupStamp = 0;
+    try {
+      const stamps = await getRemoteStamps(true);
+      startupStamp = Number(stamps[channel.dataType] || 0);
+    } catch (e) {
+      console.warn("NOL3 cloud: startup stamp check failed", channel.dataType, e);
+    }
+
+    const savedRemoteTime = Number(localStorage.getItem(channel.metaKey) || 0);
+    channel.lastStamp = startupStamp;
+
+    // Operational files are local-only. Keep their fast-path untouched so a
+    // page refresh does not rebuild/hash large datasets unnecessarily.
+    if (channel === filesChannel && startupStamp && startupStamp <= savedRemoteTime) {
+      const hasLocalFiles = !!(
+        (Array.isArray(window.NOL3?.lmInventory?.rows) && window.NOL3.lmInventory.rows.length) ||
+        (Array.isArray(window.NOL3?.incomingInventory?.rows) && window.NOL3.incomingInventory.rows.length) ||
+        (Array.isArray(window.NOL3?.lineHaulInventory?.rows) && window.NOL3.lineHaulInventory.rows.length) ||
+        window.NOL3?.lmInventory?.fileName || window.NOL3?.incomingInventory?.fileName || window.NOL3?.lineHaulInventory?.fileName
+      );
+      if (hasLocalFiles) {
+        channel.initialized = true;
+        channel.lastRemoteUpdatedAt = startupStamp;
+        channel.lastLocalMutationAt = savedRemoteTime;
+        channel.lastHash = `startup-files:remote:${startupStamp}`;
+        return false;
+      }
+    }
+
+    const local = await channel.buildSnapshot();
+    const dirtyKey = channel === settingsChannel
+      ? LOCAL_SETTINGS_DIRTY_KEY
+      : channel === rosterChannel
+        ? LOCAL_ROSTER_DIRTY_KEY
+        : "";
+    const localDirtyAt = dirtyKey ? getLocalDirty(dirtyKey) : 0;
+
+    // Settings and the rider roster are small enough to read once on every
+    // startup. They are cloud-backed state, so a stale browser timestamp must
+    // never prevent a valid remote copy from being downloaded after refresh.
+    // The dirty marker is the only local signal that a user made a newer change
+    // which should win over the cloud copy.
+    const needsRemoteRead = channel === settingsChannel || channel === rosterChannel ||
+      !startupStamp || startupStamp > savedRemoteTime || !savedRemoteTime;
+    let remote = null;
+    if (needsRemoteRead) remote = await readRemoteFor(channel);
+
+    if (!remote || !remote.data) {
+      channel.initialized = true;
+      channel.lastHash = startupFingerprint(channel, local);
+      channel.lastRemoteUpdatedAt = startupStamp || 0;
+      channel.lastLocalMutationAt = localDirtyAt || savedRemoteTime || 0;
+
+      // No cloud record: publish valid local state once. Never publish an empty
+      // roster/settings snapshot merely because the browser cache was empty.
+      if (snapshotHasData(channel, local) && !startupStamp) {
+        try {
+          local.clientUpdatedAt = Math.max(localDirtyAt, Date.now());
+          await pushSnapshotFor(channel, local);
+          channel.lastRemoteUpdatedAt = local.clientUpdatedAt;
+          channel.lastLocalMutationAt = local.clientUpdatedAt;
+          channel.lastHash = startupFingerprint(channel, local);
+          localStorage.setItem(channel.metaKey, String(local.clientUpdatedAt));
+          if (dirtyKey) clearLocalDirty(dirtyKey);
+        } catch (e) {
+          console.warn("NOL3 cloud: initial local publish failed", channel.dataType, e);
+        }
+      }
+      return false;
+    }
+
+    const remoteSnapshot = remote.data;
+    const remoteTime = Number(remoteSnapshot?.clientUpdatedAt || Date.parse(remote.updated_at || 0) || 0);
+
+    const localHasData = channel === settingsChannel
+      ? settingsHasMeaningfulData(local?.localState)
+      : snapshotHasData(channel, local);
+    const remoteHasData = channel === settingsChannel
+      ? settingsHasMeaningfulData(remoteSnapshot?.localState)
+      : snapshotHasData(channel, remoteSnapshot);
+
+    // A real local edit takes precedence over the cloud copy. This is the only
+    // time startup is allowed to keep local settings/roster over remote data.
+    // A stale dirty marker with an EMPTY local roster/settings must not block a
+    // valid cloud restore.
+    const localEditWins = !!(localDirtyAt && localHasData);
+
+    if (localEditWins && localDirtyAt >= remoteTime) {
+      try {
+        local.clientUpdatedAt = Math.max(localDirtyAt, Date.now());
+        channel.lastLocalMutationAt = local.clientUpdatedAt;
+        await pushSnapshotFor(channel, local);
+        channel.lastRemoteUpdatedAt = local.clientUpdatedAt;
+        channel.lastHash = startupFingerprint(channel, local);
+        localStorage.setItem(channel.metaKey, String(local.clientUpdatedAt));
+        clearLocalDirty(dirtyKey);
+        channel.initialized = true;
+        return true;
+      } catch (e) {
+        console.warn("NOL3 cloud: startup local publish failed", channel.dataType, e);
+      }
+    }
+
+    // For settings and roster, Firebase is the source of truth at startup.
+    // Always restore a valid remote copy when there is no newer local edit.
+    // This fixes the case where a stale local meta timestamp blocked the read
+    // even though the Firebase record still contained valid riders/settings.
+    if ((channel === settingsChannel || channel === rosterChannel) && remoteHasData && !localEditWins) {
+      await channel.applyRemote(remoteSnapshot);
+      channel.lastRemoteUpdatedAt = remoteTime;
+      channel.lastLocalMutationAt = remoteTime;
+      try { localStorage.setItem(channel.metaKey, String(remoteTime)); } catch (_) {}
+      if (dirtyKey) clearLocalDirty(dirtyKey);
+      channel.lastHash = startupFingerprint(channel, remoteSnapshot);
+      channel.initialized = true;
+      return true;
+    }
+
+    if (channel === filesChannel && remoteSnapshot?.clearedByUser === true) {
+      await channel.applyRemote(remoteSnapshot);
+      channel.lastRemoteUpdatedAt = remoteTime;
+      channel.lastLocalMutationAt = remoteTime;
+      try { localStorage.setItem(channel.metaKey, String(remoteTime)); } catch (_) {}
+      channel.lastHash = startupFingerprint(channel, remoteSnapshot);
+      channel.initialized = true;
+      return true;
+    }
+
+    if (remoteTime > Math.max(savedRemoteTime, localDirtyAt, channel.lastLocalMutationAt || 0)) {
+      await channel.applyRemote(remoteSnapshot);
+      channel.lastRemoteUpdatedAt = remoteTime;
+      channel.lastLocalMutationAt = remoteTime;
+      try { localStorage.setItem(channel.metaKey, String(remoteTime)); } catch (_) {}
+      if (dirtyKey) clearLocalDirty(dirtyKey);
+      channel.lastHash = startupFingerprint(channel, remoteSnapshot);
+      channel.initialized = true;
+      return true;
+    }
+
+    channel.initialized = true;
+    channel.lastRemoteUpdatedAt = Math.max(channel.lastRemoteUpdatedAt, remoteTime);
+    channel.lastHash = startupFingerprint(channel, local);
+    return false;
+  }
+
+  async function syncChannelOnce(channel, allowPush = false) {
+    if (!isSelectedHubCloudIdVerified()) return false;
+    if (channel.syncing || !configured() || applyingRemote) return false;
+    if (!channel.initialized) {
+      await ensureChannelInitialized(channel);
+      if (!channel.initialized) return false;
+    }
+    channel.syncing = true;
+    try {
+      // Normal polling must never build/hash the large file snapshot. We only
+      // need the tiny timestamp marker unless this call explicitly permits a push.
+      let local = null;
+      if (allowPush) {
+        local = await channel.buildSnapshot();
+        const needsPush = snapshotHasData(channel, local) || channel.allowEmptyPush;
+        if (needsPush && !(channel === filesChannel && channel.lastRemoteClearedByUser && !snapshotHasData(channel, local))) {
+          if (channel === filesChannel && snapshotHasData(channel, local)) channel.lastRemoteClearedByUser = false;
+          channel.lastLocalMutationAt = Date.now();
+          local.clientUpdatedAt = channel.lastLocalMutationAt;
+          if (channel === filesChannel) channel.lastRemoteClearedByUser = false;
+          await pushSnapshotFor(channel, local);
+          channel.lastRemoteUpdatedAt = channel.lastLocalMutationAt;
+          channel.lastHash = startupFingerprint(channel, local);
+          try { localStorage.setItem(channel.metaKey, String(channel.lastLocalMutationAt)); } catch (_) {}
+          if (channel === settingsChannel) clearLocalDirty(LOCAL_SETTINGS_DIRTY_KEY);
+          if (channel === rosterChannel) clearLocalDirty(LOCAL_ROSTER_DIRTY_KEY);
+        }
+      }
+
+      const stamps = await getRemoteStamps();
+      const stamp = stamps[channel.dataType] || 0;
+      if (!stamp || stamp === channel.lastStamp) return false;
+
+      const remote = await readRemoteFor(channel);
+      const remoteStamp = remote ? (Date.parse(remote.updated_at) || stamp) : stamp;
+      if (remote?.data) {
+        const remoteTime = Number(remote.data.clientUpdatedAt || new Date(remote.updated_at || 0).getTime() || 0);
+        if (remoteTime > channel.lastRemoteUpdatedAt && remoteTime > channel.lastLocalMutationAt) {
+          await channel.applyRemote(remote.data);
+          channel.lastRemoteUpdatedAt = remoteTime;
+          channel.lastLocalMutationAt = remoteTime;
+          try { localStorage.setItem(channel.metaKey, String(remoteTime)); } catch (_) {}
+          // Lightweight fingerprint; never stringify the full operational dataset
+          // just to remember that this snapshot is now current.
+          channel.lastHash = startupFingerprint(channel, remote.data);
+          channel.lastStamp = remoteStamp;
+          return true;
+        }
+      }
+      channel.lastStamp = remoteStamp;
+      return false;
+    } finally {
+      channel.syncing = false;
+    }
+  }
+
+  async function syncSettingsAndRoster(allowPush = false) {
+    if (!isSelectedHubCloudIdVerified()) {
+      status(`LOCAL ONLY • ${HUB_NAME} ID UNVERIFIED`, true);
+      return;
+    }
+    try {
+      const a = await syncChannelOnce(settingsChannel, allowPush);
+      const b = await syncChannelOnce(rosterChannel, allowPush);
+      status(a || b ? "SYNCED • CLOUD UPDATE" : "CONNECTED • LIVE", true);
+      if (a || b) {
+        try {
+          if (typeof NOL3.renderPage === "function") NOL3.renderPage(NOL3.state?.currentPage || "planning");
+        } catch (_) {}
+      }
+    } catch (error) {
+      console.error("NOL3 cloud sync failed:", error);
+      status("OFFLINE • RETRYING", false);
+    }
+  }
+
+  // Operational file cloud sync is intentionally disabled. Uploads stay in the
+  // browser's local store; SPX/FMS auto-sync repopulates them locally.
+  async function syncFiles(_allowPush = false) { return false; }
+
+  // Kept for any code elsewhere that calls window.NOL3CloudSync.syncNow().
+  async function syncOnce() {
+    if (!isSelectedHubCloudIdVerified()) {
+      status(`LOCAL ONLY • ${HUB_NAME} ID UNVERIFIED`, true);
+      return false;
+    }
+    try {
+      await syncChannelOnce(settingsChannel, true);
+      await syncChannelOnce(rosterChannel, true);
+      status("SAVED • CLOUD", true);
+    } catch (error) {
+      console.error("NOL3 manual cloud save failed:", error);
+      status("SAVE FAILED", false);
+      throw error;
+    }
+  }
+
+  function schedulePushCheck(channel, runner) {
+    clearTimeout(channel.pushTimer);
+    channel.pushTimer = setTimeout(() => runner(), channel.debounceMs);
+  }
+
+  // Kept for compatibility with older Clear handlers. Operational uploads are
+  // local-only, so this function deliberately performs NO cloud write.
+  async function clearUploadedFilesCloud() {
+    return true;
+  }
+
+  async function clearRosterCloud() {
+    const snap = { version: 2, hubId: HUB_ID, hubName: HUB_NAME, hubCode: HUB_CODE, clientUpdatedAt: Date.now(), clearedAt: Date.now(), clearedByUser: true, riderData: null };
+    await pushSnapshotFor(rosterChannel, snap);
+    rosterChannel.initialized = true;
+    rosterChannel.lastHash = stableHash(await rosterChannel.buildSnapshot());
+    rosterChannel.lastRemoteUpdatedAt = snap.clientUpdatedAt;
+    rosterChannel.lastLocalMutationAt = snap.clientUpdatedAt;
+    try { localStorage.setItem(rosterChannel.metaKey, String(snap.clientUpdatedAt)); } catch (_) {}
+    return snap;
+  }
+
+  // Kept for compatibility with the SPX/FMS upload path. Operational uploads
+  // must never be written to the cloud.
+  async function commitFilesUploadNow() {
+    return false;
+  }
+
+  window.NOL3CloudSync = {
+    syncNow: syncOnce,
+    commitFilesUploadNow,
+    clearUploadedFilesCloud,
+    clearRosterCloud,
+    usage: readEgress,
+    provider: activeProvider,
+    get hubId() { return HUB_ID; },
+    get hubName() { return HUB_NAME; },
+    get hubCode() { return HUB_CODE; }
+  };
+
+  window.addEventListener("load", function () {
+    // Hub selection is user-controlled. The selected hub was initialized
+    // before render from the local 26-hub preset list.
+    try {
+      const label = document.getElementById("hubPickerLabel");
+      if (label) label.textContent = (NOL3?.state?.selectedHub || NOL3_DEFAULT_HUB_NAME);
+    } catch (e) { console.warn("NOL3: Could not initialize hub selector", e); }
+
+    try {
+      const today = typeof getNOL3TodayDate === "function" ? getNOL3TodayDate() : new Date().toISOString().slice(0,10);
+      NOL3.currentBusinessDate = today;
+      NOL3Storage.set("nol3_business_day_date_v1", today);
+    } catch (_) {}
+
+    loadCloudConfig().then(async () => {
+      // Reconcile cloud Settings + Riders without triggering intermediate page
+      // rebuilds. The current page is rendered once after both channels finish.
+      window.__NOL3_CLOUD_STARTUP_SYNC = true;
+      // Settings and Rider Data are independent cloud channels. A failure in
+      // one must NEVER prevent the other from restoring after a page refresh.
+      let settingsOk = false;
+      let rosterOk = false;
+      try {
+        await initialSyncChannel(settingsChannel);
+        settingsOk = true;
+        console.info("NOL3 startup: settings restore complete");
+      } catch (error) {
+        console.error("NOL3 startup: settings restore failed", error);
+      }
+
+      try {
+        await initialSyncChannel(rosterChannel);
+        rosterOk = true;
+        console.info("NOL3 startup: roster restore complete", { rows: NOL3?.riderData?.rows?.length || 0 });
+      } catch (error) {
+        console.error("NOL3 startup: roster restore failed", error);
+      }
+
+      // Last-resort recovery: bypass the channel state machine completely and
+      // read the configured Firebase records directly. This protects startup
+      // recovery from any provider/timestamp/state-machine exception.
+      const directFirebaseRead = async (dataType) => {
+        const url = `${DEFAULT_FIREBASE_URL}/hub_data/${HUB_ID}/${encodeURIComponent(dataType)}.json?startup=${Date.now()}`;
+        const response = await fetch(url, { cache: "no-store" });
+        if (!response.ok) throw new Error(`Firebase ${response.status}: ${response.statusText}`);
+        const row = await response.json();
+        if (!row || typeof row.json !== "string") return null;
+        let data = JSON.parse(row.json);
+        if (data?.z === 1 && typeof data.gz === "string") data = await unpackSnapshot(data);
+        return { data, updated_at: row.updated_at || "" };
+      };
+
+      // Recover Settings independently when the normal settings channel failed
+      // or produced no meaningful local state.
+      if (!settingsOk) {
+        try {
+          const directSettings = await directFirebaseRead(settingsChannel.dataType);
+          if (directSettings?.data?.localState) {
+            await settingsChannel.applyRemote(directSettings.data);
+            const ts = Number(directSettings.data.clientUpdatedAt || Date.parse(directSettings.updated_at || 0) || Date.now());
+            settingsChannel.lastRemoteUpdatedAt = ts;
+            settingsChannel.lastLocalMutationAt = ts;
+            settingsChannel.lastStamp = ts;
+            settingsChannel.initialized = true;
+            try { localStorage.setItem(settingsChannel.metaKey, String(ts)); } catch (_) {}
+            settingsOk = true;
+            console.info("NOL3 startup: direct Firebase settings recovery complete");
+          }
+        } catch (error) {
+          console.error("NOL3 startup: direct Firebase settings recovery failed", error);
+        }
+      }
+
+      // Recover Rider Data independently whenever the HTML still has no roster.
+      if (!(Array.isArray(NOL3?.riderData?.rows) && NOL3.riderData.rows.length)) {
+        try {
+          const directRoster = await directFirebaseRead(rosterChannel.dataType);
+          const rider = directRoster?.data?.riderData;
+          if (rider && ((Array.isArray(rider.rows) && rider.rows.length) || rider.rawText || rider.fileName)) {
+            NOL3.riderData = rider;
+            const hub = (NOL3.getState && NOL3.getState().selectedHub) || HUB_NAME;
+            window.NOL3RiderHubStore?.save?.(rider, hub);
+            clearLocalDirty(LOCAL_ROSTER_DIRTY_KEY);
+            const ts = Number(directRoster.data.clientUpdatedAt || Date.parse(directRoster.updated_at || 0) || Date.now());
+            rosterChannel.lastRemoteUpdatedAt = ts;
+            rosterChannel.lastLocalMutationAt = ts;
+            rosterChannel.lastStamp = ts;
+            rosterChannel.initialized = true;
+            try { localStorage.setItem(rosterChannel.metaKey, String(ts)); } catch (_) {}
+            if (!window.__NOL3_CLOUD_STARTUP_SYNC) {
+              window.dispatchEvent(new CustomEvent("inventoryloaded", { detail: { type: "riders", source: "firebase-direct" } }));
+              if (NOL3.state?.currentPage === "riders" && typeof NOL3.renderPage === "function") NOL3.renderPage("riders");
+            }
+            rosterOk = true;
+            console.info("NOL3 startup: direct Firebase roster recovery complete", { rows: rider.rows?.length || 0 });
+          }
+        } catch (error) {
+          console.error("NOL3 startup: direct Firebase roster recovery failed", error);
+        }
+      }
+
+      if (window.__NOL3_BADOC_SPLIT_CLEANUP_DIRTY) {
+        window.__NOL3_BADOC_SPLIT_CLEANUP_DIRTY = false;
+        try { await syncSettingsAndRoster(true); } catch (error) {
+          console.warn("NOL3 startup: post-restore settings sync failed", error);
+        }
+      }
+
+      window.__NOL3_CLOUD_STARTUP_SYNC = false;
+      // Perform exactly one final render after all cloud reconciliation is done.
+      requestAnimationFrame(() => {
+        try {
+          if (typeof NOL3.renderPage === "function") {
+            NOL3.renderPage(NOL3.getState().currentPage || "planning");
+          }
+        } catch (error) {
+          console.warn("NOL3 startup: final page render failed", error);
+        }
+      });
+
+      // Operational uploaded files are intentionally NOT restored from cloud.
+      // They remain local and are populated by the SPX/FMS auto-sync path.
+      if (settingsOk && rosterOk) status("CONNECTED • LIVE", true);
+      else if (rosterOk) status("CONNECTED • SETTINGS RETRYING", false);
+      else if (settingsOk) status("CONNECTED • RIDERS RETRYING", false);
+      else status("CONNECTED • RETRYING", false);
+      startAdaptivePolling();
+
+      // Retry only the failed channels after the page is interactive.
+      setTimeout(async () => {
+        if (!settingsOk) {
+          try { await initialSyncChannel(settingsChannel); } catch (error) { console.warn("NOL3 startup retry: settings", error); }
+        }
+        if (!rosterOk && !(Array.isArray(NOL3?.riderData?.rows) && NOL3.riderData.rows.length)) {
+          try { await initialSyncChannel(rosterChannel); } catch (error) { console.warn("NOL3 startup retry: roster", error); }
+        }
+      }, 1500);
+    }).catch(e => {
+      window.__NOL3_CLOUD_STARTUP_SYNC = false;
+      console.error("NOL3 cloud configuration/startup failed", e);
+      status("FIREBASE CONFIG FAILED • RETRYING", false);
+      startAdaptivePolling();
+    });
+  });
+
+  // Catch changes that use the existing storage adapter. IndexedDB changes are
+  // also detected by each channel's own periodic snapshot hash, but scheduling
+  // an immediate check here makes edits show up on other devices without
+  // waiting for the next poll.
+  window.addEventListener("hubchange", () => {
+    const hub = (NOL3.getState && NOL3.getState().selectedHub) || HUB_NAME;
+    // Always clear the previous hub's roster before loading the new hub's.
+    NOL3.riderData = null;
+    try { window.NOL3FileStore?.remove?.("riders"); } catch (_) {}
+    const savedRider = window.NOL3RiderHubStore?.load?.(hub);
+    if (savedRider) {
+      NOL3.riderData = savedRider;
+      window.dispatchEvent(new CustomEvent("inventoryloaded", { detail: { type: "riders", source: "hub-local" } }));
+    }
+  });
+  // Auto-save local changes after the initial cloud restore has completed.
+  // Cloud-originated events are ignored so a remote restore cannot immediately
+  // echo itself back as a new local version.
+  window.addEventListener("planningchanged", (event) => {
+    if (applyingRemote || event?.detail?.source === "cloud") return;
+    // LH Trip ETA is deliberately LOCAL-ONLY. It must never mark the
+    // Settings channel dirty or trigger a cloud push.
+    if (String(event?.detail?.type || "") === "linehaul-arrival") return;
+    markLocalDirty(LOCAL_SETTINGS_DIRTY_KEY);
+    schedulePushCheck(settingsChannel, () => syncSettingsAndRoster(true));
+  });
+
+  window.addEventListener("inventoryloaded", (event) => {
+    if (applyingRemote || event?.detail?.source === "cloud" || event?.detail?.source === "hub-local") return;
+    if (event?.detail?.type === "linehaul") {
+      markLocalDirty(LOCAL_SETTINGS_DIRTY_KEY);
+      schedulePushCheck(settingsChannel, () => syncSettingsAndRoster(true));
+    }
+  });
+
+  window.addEventListener("zonesettingschanged", (event) => {
+    if (applyingRemote || event?.detail?.source === "cloud") return;
+    markLocalDirty(LOCAL_SETTINGS_DIRTY_KEY);
+    schedulePushCheck(settingsChannel, () => syncSettingsAndRoster(true));
+  });
+
+  window.addEventListener("businessdatechange", (event) => {
+    if (applyingRemote || event?.detail?.source === "cloud") return;
+    markLocalDirty(LOCAL_SETTINGS_DIRTY_KEY);
+    schedulePushCheck(settingsChannel, () => syncSettingsAndRoster(true));
+  });
+
+  window.addEventListener("inventoryloaded", (event) => {
+    if (applyingRemote || event?.detail?.source === "cloud" || event?.detail?.source === "hub-local") return;
+    const type = event?.detail?.type;
+    if (type === "riders") {
+      markLocalDirty(LOCAL_ROSTER_DIRTY_KEY);
+      schedulePushCheck(rosterChannel, () => syncSettingsAndRoster(true));
+    } else if (type === "lm" || type === "incoming" || type === "linehaul") {
+      // Operational uploads are LOCAL-ONLY. Do not push them to the cloud.
+      return;
+    }
+  });
+
+  window.addEventListener("inventorycleared", (_event) => {
+    // Operational uploaded files are LOCAL-ONLY; clearing them must not write
+    // an empty snapshot/tombstone to the cloud.
+  });
+})();
 </script>
 
 
@@ -13124,7 +15101,11 @@ window.addEventListener("load", function () {
   }
 
   function targetFP(){
-    const hub=HUB_KEY(); let v=''; try{v=NOL3Storage.get('nol3_fleet_productivity_v1:'+hub)||NOL3Storage.get('nol3_fleet_productivity_v1')||'';}catch(e){}
+    const hub=HUB_KEY(); let v='';
+    try {
+      v=NOL3Storage.get('nol3_fleet_productivity_v1:'+hub)||'';
+      if(!v && hub==='Badoc Hub') v=NOL3Storage.get('nol3_fleet_productivity_v1')||'';
+    } catch(e){}
     const n=Number(v); return Number.isFinite(n)&&n>0?n:50;
   }
 
@@ -13150,7 +15131,25 @@ window.addEventListener("load", function () {
     const fourTarget=Math.max(0,saved4Usage);
     const sim4Usage=simTotal>0?sim4/simTotal:0; const actual4Usage=actual.total>0?actual.four/actual.total:0;
     const inv=(x,t)=>t>0?Math.max(0,Math.min(100,(1-x/t)*100)):100;
-    const currentSR=riders.length?actual.total/riders.length*100:0;
+    // Assign OID = current-hub LM parcels with status Delivering, Delivered, or OnHold.
+    // Current SR is Delivered / Assign OID. Simulated Number excludes assigned Flexi riders.
+    const lmForSR=(typeof NOL3.getPlanningLMInventoryV10 === 'function' ? NOL3.getPlanningLMInventoryV10() : NOL3.lmInventory);
+    let assignedOID=0, deliveredOID=0;
+    if(lmForSR && Array.isArray(lmForSR.headers)){
+      const srHeaders=lmForSR.headers.map(nrm);
+      const srStatusIndex=['spx status','status','parcel status','order status'].map(h=>srHeaders.indexOf(h)).find(i=>i>=0) ?? -1;
+      const srRows=Array.isArray(lmForSR.filteredRows) && lmForSR.filteredRows.length ? lmForSR.filteredRows : (Array.isArray(lmForSR.rows) ? lmForSR.rows : []);
+      if(srStatusIndex>=0) srRows.forEach(row=>{
+        const status=nrm(row[srStatusIndex]).toUpperCase().replace(/[\s_-]+/g,' ');
+        if(status==='DELIVERING' || status.endsWith(' DELIVERING') || status==='DELIVERED' || status.endsWith(' DELIVERED') || status==='ONHOLD' || status==='ON HOLD' || status.endsWith(' ONHOLD') || status.endsWith(' ON HOLD') || status==='ON HOLD'){
+          assignedOID++;
+          if(status==='DELIVERED' || status.endsWith(' DELIVERED')) deliveredOID++;
+        }
+      });
+    }
+    const deployedNonFlexi=Math.max(0,actual.total-actual.flexi);
+    const currentSR=assignedOID>0?deliveredOID/assignedOID*100:0;
+    const simulatedNumber=deployedNonFlexi>0?(assignedOID/deployedNonFlexi)*(currentSR/100):0;
     const savedSRTarget=Number(sim.kpiCurrentSRTargetPct);
     const currentSRTargetPct=Number.isFinite(savedSRTarget)&&savedSRTarget>=0?savedSRTarget:86.78;
     const currentSRAchievement=currentSRTargetPct>0?currentSR/currentSRTargetPct*100:0;
@@ -13170,7 +15169,7 @@ window.addEventListener("load", function () {
           <div class="fleet-overview-kpi-body">
             <div class="fleet-overview-kpi-row"><div class="fleet-overview-kpi-label">Allmile Productivity</div><div class="fleet-overview-kpi-col"><input class="fleet-overview-kpi-editor" id="fleetOverviewFPTarget" type="number" min="1" step="0.01" value="${fpTarget}"></div><div class="fleet-overview-kpi-col fleet-overview-kpi-value">${actualFP.toFixed(2)}</div><div class="fleet-overview-kpi-col fleet-overview-rate">${((Number(fpTarget)||0)>0?(actualFP/Number(fpTarget))*100:0).toFixed(2)}%</div><div class="fleet-overview-kpi-col fleet-overview-muted">${actual.total.toLocaleString()} deployed / ${riders.length.toLocaleString()} active</div></div>
             <div class="fleet-overview-kpi-row"><div class="fleet-overview-kpi-label">4WH Usage</div><div class="fleet-overview-kpi-col"><input class="fleet-overview-kpi-editor" id="fleetOverview4WHTarget" type="number" min="0" step="0.01" value="${fourTarget.toFixed(2)}"></div><div class="fleet-overview-kpi-col fleet-overview-kpi-value">${actual4Usage.toFixed(2)}</div><div class="fleet-overview-kpi-col fleet-overview-rate">${inv(actual4Usage,fourTarget).toFixed(0)}%</div><div class="fleet-overview-kpi-col fleet-overview-muted">Actual 4WH ratio</div></div>
-            <div class="fleet-overview-kpi-row"><div class="fleet-overview-kpi-label">Current SR</div><div class="fleet-overview-kpi-col"><span class="fleet-overview-kpi-editor-wrap"><input class="fleet-overview-kpi-editor" id="fleetOverviewSRTarget" type="number" min="0" max="100" step="0.01" value="${currentSRTargetPct}"><span>%</span></span></div><div <span> </div><div </span> </div><span><div class="fleet-overview-kpi-col fleet-overview-muted">${actual.total.toLocaleString()} deployed / ${riders.length.toLocaleString()} active</div></div>
+            <div class="fleet-overview-kpi-row"><div class="fleet-overview-kpi-label">Current SR</div><div class="fleet-overview-kpi-col"><span class="fleet-overview-kpi-editor-wrap"><input class="fleet-overview-kpi-editor" id="fleetOverviewSRTarget" type="number" min="0" max="100" step="0.01" value="${currentSRTargetPct}"><span>%</span></span></div><div class="fleet-overview-kpi-col fleet-overview-kpi-value"></div><div class="fleet-overview-kpi-col fleet-overview-rate"></div><div class="fleet-overview-kpi-col fleet-overview-muted">${assignedOID.toLocaleString()} assigned OID / ${deployedNonFlexi.toLocaleString()} deployed non-Flexi riders · SR ${currentSR.toFixed(2)}%</div></div>
           </div>
           </div>
         </section>
@@ -14692,7 +16691,7 @@ NOL3.clearRiderData = async function () {
     if(destinationIdx<0)throw new Error('Inbound SPX export has no Destination Station column.');
     NOL3.autoDetectStationFromRows?.(headers,rows.slice(1));
 
-    const hubName = NOL3.getHubName?.() || 'Bauko Hub';
+    const hubName = NOL3.getHubName?.() || 'Badoc Hub';
     // LMHub_Assigned / LMHub_Assigning count as LM inventory. Upstream rows
     // (SOC_LHTransporting / Transported) are physically at a DC or SOC, so only
     // Destination Station is checked, never Current Station.
@@ -14731,7 +16730,7 @@ NOL3.clearRiderData = async function () {
     if(destinationIdx<0)throw new Error('Delivery SPX export has no Destination Station column.');
     NOL3.autoDetectStationFromRows?.(headers,rows.slice(1));
 
-    const hubName = NOL3.getHubName?.() || 'Bauko Hub';
+    const hubName = NOL3.getHubName?.() || 'Badoc Hub';
     const allowedStatus=new Set(['delivering','delivered','onhold','on_hold','2','4','5']);
     const kept=rows.slice(1).filter(r=>{
       const status=normalizeBridgeStatus(r[statusIdx]);
@@ -15900,7 +17899,7 @@ NOL3.clearRiderData = async function () {
 (function(){
   function refreshHubText(){
     const cfg = NOL3.getSelectedHubConfig?.() || {};
-    const hub = cfg.name || NOL3.getState?.().selectedHub || "Bauko Hub";
+    const hub = cfg.name || NOL3.getState?.().selectedHub || "Badoc Hub";
     const inbound = document.getElementById("syncParcelInboundFromSPX");
     const delivery = document.getElementById("syncParcelDeliveryFromSPX");
     const label = document.getElementById("hubPickerLabel");
@@ -15920,6 +17919,7 @@ NOL3.clearRiderData = async function () {
   async function restoreActiveHubRuntime(){
     const cfg = NOL3.getSelectedHubConfig?.() || {};
     try { window.HUB_NAME = cfg.name || window.HUB_NAME || "Badoc Hub"; window.HUB_CODE = cfg.code || window.HUB_CODE || "BADOC"; window.HUB_ID = Number(cfg.id || window.HUB_ID || 3); } catch (_) {}
+    try { await NOL3FileStore?.ready?.(); } catch (error) { console.warn("NOL3: device storage restore initialization failed", error); }
     try { NOL3FileStore?.switchHub?.(); } catch (_) {}
     // LM is maintained by the existing date/hub-specific planning snapshot.
     // Clear the previous hub's live copy first so its rows cannot leak into the
