@@ -11589,6 +11589,10 @@ NOL3.pages.riders = function (root) {
   const records = new Map();
   const histories = new Map();
   const idbRecords = new Map();
+  // Memory-only store: keep each hub's records in RAM so a hub switch (or a
+  // repeated "hubchange" for the SAME hub) never wipes uploaded data.
+  const memByHub = new Map();
+  let loadedHub = null;
   const PERSIST_PREFIX = "NOL3_LOCAL_OPERATIONAL_V4:";
   const PREVIOUS_PREFIX = "NOL3_LOCAL_OPERATIONAL_V3:";
   const LEGACY_PREFIX = "NOL3_LOCAL_OPERATIONAL_V2:";
@@ -11741,8 +11745,13 @@ NOL3.pages.riders = function (root) {
     };
   }
   function loadHubRecords() {
-    records.clear();
     const hub = currentHubCode();
+    if (loadedHub === hub) return;                       // same hub: keep everything in memory
+    if (loadedHub) memByHub.set(loadedHub, new Map(records));   // stash the hub we are leaving
+    records.clear();
+    const cachedForHub = memByHub.get(hub);
+    if (cachedForHub) cachedForHub.forEach((v, k) => records.set(k, v));
+    loadedHub = hub;
     for (const type of PERSIST_TYPES) {
       const local = parseLocalRecord(type, hub);
       const indexed = idbRecords.get(`${hub}:${type}`)?.record || null;
@@ -11870,7 +11879,12 @@ NOL3.pages.riders = function (root) {
     },
     getHistories() { const hub = currentHubCode(); return Array.from(histories.values()).filter(r => String(r.businessDate || "") && histories.has(historyCacheKey(hub, r.businessDate))).map(clone); },
     switchHub() {
+      const hubBefore = loadedHub;
       loadHubRecords();
+      if (hubBefore === loadedHub) {
+        // Same hub: nothing to switch. Never blank the live Incoming / From-To data.
+        return { incoming: !!records.get("incoming"), linehaul: !!records.get("linehaul"), unchanged: true };
+      }
       const incoming = records.get("incoming");
       const linehaul = records.get("linehaul");
       // Unified Inventory uploads keep their Incoming rows INSIDE the
@@ -11900,6 +11914,7 @@ NOL3.pages.riders = function (root) {
     async clearOperational() {
       const hub = currentHubCode();
       records.clear();
+      memByHub.delete(hub);
       for (const type of PERSIST_TYPES) {
         try { localStorage.removeItem(persistKey(type, hub)); } catch (_) {}
         try { localStorage.removeItem(`${PREVIOUS_PREFIX}${hub}:${type}`); } catch (_) {}
