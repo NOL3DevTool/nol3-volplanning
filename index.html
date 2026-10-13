@@ -5800,6 +5800,8 @@ NOL3.pages.planning = function (root) {
       const arrived = getArrivedIncomingTasks();
       if (checked) arrived.add(value); else arrived.delete(value);
       saveArrivedIncomingTasks(arrived);
+      // Cached Planning tabs must be re-rendered after an Arrived change.
+      try { if (typeof markPlanningTabsDirty === "function") markPlanningTabsDirty("onfloor", "incoming"); } catch (_) {}
       window.dispatchEvent(new CustomEvent("planningchanged", {
         detail: { type: "incoming-arrived", source: "local" }
       }));
@@ -7312,6 +7314,32 @@ NOL3.pages.planning = function (root) {
         // volume shown by By Town. This includes unassigned split towns as their
         // own town cards and excludes any split town already assigned to a
         // Delivery Area/Town Group. This guarantees By Town = 0 => By Zone = 0.
+        // Incoming (ETA before COT / selected) and Arrived volume has no Zone ID,
+        // so it was missing from this view. Merge it into the town display here.
+        const zoneLookup = new Map();
+        authoritativeTownDisplay.forEach((v, k) => {
+          const lk = String(v.baseTown || k).trim().toLowerCase();
+          if (!v.splitArea && !zoneLookup.has(lk)) zoneLookup.set(lk, k);
+        });
+        const addIncomingZoneMode = (sourceCounts) => {
+          if (!(sourceCounts instanceof Map)) return;
+          sourceCounts.forEach((count, town) => {
+            const parsed = parseTownValue(town);
+            const n = Number(count || 0);
+            if (!parsed || !n) return;
+            const baseTown = zoneLookup.get(parsed.toLowerCase()) || parsed;
+            if (assignedTowns.has(baseTown) || assignedTowns.has(parsed)) return;
+            let item = authoritativeTownDisplay.get(baseTown);
+            if (!item) {
+              item = { town: baseTown, displayTown: baseTown, baseTown, splitArea: '', count: 0, incomingCount: 0 };
+              authoritativeTownDisplay.set(baseTown, item);
+              zoneLookup.set(parsed.toLowerCase(), baseTown);
+            }
+            item.incomingCount = Number(item.incomingCount || 0) + n;
+          });
+        };
+        if (showIncomingOrdersOnFloor) addIncomingZoneMode(getIncomingTownCounts());
+        addIncomingZoneMode(getArrivedIncomingTownCounts());
         displayItems = [...authoritativeTownDisplay.values()];
       }
 
@@ -7453,6 +7481,13 @@ NOL3.pages.planning = function (root) {
             bucket.items.push({ item, count });
             zoneGroups.set(zoneId, bucket);
           });
+          // Incoming/Arrived orders carry no Zone ID: show them under "No Zone ID".
+          if (Number(item.incomingCount || 0) > 0) {
+            const bucket = zoneGroups.get('No Zone ID') || { total: 0, items: [] };
+            bucket.total += Number(item.incomingCount);
+            bucket.items.push({ item, count: Number(item.incomingCount) });
+            zoneGroups.set('No Zone ID', bucket);
+          }
         });
         let groupEntries = [...zoneGroups.entries()].sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
         if (zoneFilterText) groupEntries = groupEntries.filter(([zoneId]) => zoneId.toLowerCase().includes(zoneFilterText));
@@ -8700,15 +8735,10 @@ NOL3.pages.planning = function (root) {
           // so its matched orders must be added to Total Volume. Keep this
           // separate from the LM snapshot so the existing LM calculation is
           // not altered.
-          let arrivedTotal = 0;
-          try {
-            if (typeof getArrivedIncomingTownCounts === 'function') {
-              const arrivedCounts = getArrivedIncomingTownCounts();
-              arrivedTotal = [...arrivedCounts.values()].reduce((sum,count)=>sum+Number(count||0),0);
-            }
-          } catch (_) { arrivedTotal = 0; }
 
-          totalEl.textContent=(lmTotal + arrivedTotal).toLocaleString();
+          // Arrived volume is already inside townCounts (renderDeliveryAreas),
+          // so it is not added a second time here.
+          totalEl.textContent=lmTotal.toLocaleString();
         }
       }
       if(fpInput&&document.activeElement!==fpInput) fpInput.value=String(getFleetProductivityTarget());
@@ -8776,6 +8806,21 @@ NOL3.pages.planning = function (root) {
           lowerKeys.set(key.toLowerCase(), key);
         });
       }
+
+      // Arrived linehauls are physically on-floor: add their matched orders to
+      // the town counts so Delivery Areas AND Total Volume both include them.
+      try {
+        const arrivedCountsForAreas = getArrivedIncomingTownCounts();
+        const lowerKeysArrived = new Map();
+        townCounts.forEach((_, k) => { const lk = String(k).toLowerCase(); if (!lowerKeysArrived.has(lk)) lowerKeysArrived.set(lk, k); });
+        arrivedCountsForAreas.forEach((count, town) => {
+          const normalizedTown = parseTownValue(town);
+          if (!normalizedTown) return;
+          const key = lowerKeysArrived.get(normalizedTown.toLowerCase()) || normalizedTown;
+          townCounts.set(key, (townCounts.get(key) || 0) + Number(count || 0));
+          lowerKeysArrived.set(key.toLowerCase(), key);
+        });
+      } catch (_) {}
 
       // Snapshot the full town totals BEFORE operational Zone Settings pieces
       // are split out. These are the unique real-town totals used only when a
@@ -11799,6 +11844,24 @@ NOL3.pages.riders = function (root) {
       loadHubRecords();
       const incoming = records.get("incoming");
       const linehaul = records.get("linehaul");
+      // Unified Inventory uploads keep their Incoming rows INSIDE the
+      // "unifiedInventory" record (there is no separate "incoming" record), so
+      // rebuild Incoming from it when returning to a hub. Without this, going
+      // to another hub and back left Incoming empty.
+      const unified = records.get("unifiedInventory");
+      const ud = unified && unified.dataset;
+      if (!incoming && ud && Array.isArray(ud.incomingRows) && ud.incomingRows.length) {
+        NOL3.incomingInventory = {
+          fileName: ud.fileName || "",
+          files: fileMeta(unified.files),
+          rows: ud.incomingRows,
+          filteredRows: [],
+          headers: Array.isArray(ud.headers) ? ud.headers : [],
+          loadedAt: ud.loadedAt || unified.savedAt || "",
+          rowCount: ud.incomingRows.length,
+          rawText: typeof ud.rawText === "string" ? ud.rawText : ""
+        };
+      } else
       if (incoming) NOL3.incomingInventory = datasetToInventory(incoming);
       else NOL3.incomingInventory = {files:[],rows:[],filteredRows:[],fileName:"",headers:[],loadedAt:"",rowCount:0,rawText:""};
       if (linehaul) NOL3.lineHaulInventory = datasetToInventory(linehaul);
@@ -13475,14 +13538,8 @@ NOL3.pages.riders = function (root) {
       // Confirmed Incoming Linehaul arrivals are part of the Planning
       // calculation. Restore them together with inventory so Total Volume and
       // Town counts match across devices.
-      if (Array.isArray(data.arrivedIncomingTasks)) {
-        try {
-          NOL3Storage.set(
-            "nol3_incoming_arrived_tasks_v1",
-            JSON.stringify(data.arrivedIncomingTasks)
-          );
-        } catch (_) {}
-      }
+      // (Arrived list now syncs through the Settings channel; ignoring the
+      // stale copy in the inventory snapshot so unchecking is not undone.)
 
       window.dispatchEvent(new CustomEvent("inventoryloaded", { detail: { type: "lm", source: "cloud" } }));
       window.dispatchEvent(new CustomEvent("inventoryloaded", { detail: { type: "incoming", source: "cloud" } }));
@@ -13576,7 +13633,8 @@ NOL3.pages.riders = function (root) {
       zoneClusterRules: NOL3.getZoneClusterRules ? NOL3.getZoneClusterRules() : [],
       frozenTodayVolume: NOL3Storage.get(`nol3_frozen_today_volume_v1:${HUB_CODE}`) || (hub === NOL3_DEFAULT_HUB_NAME ? NOL3Storage.get("nol3_frozen_today_volume_v1") : "") || "",
       weeklyDailySummary: NOL3Storage.get(`NOL3_WEEKLY_DAILY_SUMMARY_${hub}`) || "",
-      fleetOverview: parseObject(NOL3Storage.get("nol3_fleet_overview_v1:" + hub), {})
+      fleetOverview: parseObject(NOL3Storage.get("nol3_fleet_overview_v1:" + hub), {}),
+      arrivedIncomingTasks: parseObject(NOL3Storage.get("nol3_incoming_arrived_tasks_v1"), [])
     };
   }
 
@@ -13596,6 +13654,11 @@ NOL3.pages.riders = function (root) {
       }
       if (state.fleetOverview && typeof state.fleetOverview === "object") {
         NOL3Storage.set("nol3_fleet_overview_v1:" + HUB_NAME, JSON.stringify(state.fleetOverview));
+      }
+      // Arrived linehauls: the Settings channel is authoritative so that
+      // UNCHECKING Arrived is also synced (an empty list is a valid value).
+      if (Array.isArray(state.arrivedIncomingTasks)) {
+        NOL3Storage.set("nol3_incoming_arrived_tasks_v1", JSON.stringify(state.arrivedIncomingTasks));
       }
       if (state.fleetProductivity !== undefined && state.fleetProductivity !== "") {
         NOL3Storage.set("nol3_fleet_productivity_v1:" + HUB_NAME, String(state.fleetProductivity));
@@ -14096,10 +14159,6 @@ NOL3.pages.riders = function (root) {
     const merged = { ...local };
     for (const key of ["lmInventory", "incomingInventory", "lineHaulInventory"]) {
       if (!has(local[key]) && has(remote[key])) merged[key] = remote[key];
-    }
-    if ((!Array.isArray(local.arrivedIncomingTasks) || local.arrivedIncomingTasks.length === 0) &&
-        Array.isArray(remote.arrivedIncomingTasks) && remote.arrivedIncomingTasks.length) {
-      merged.arrivedIncomingTasks = remote.arrivedIncomingTasks;
     }
     return merged;
   }
@@ -18374,7 +18433,8 @@ NOL3.clearRiderData = async function () {
     const cfg = NOL3.getSelectedHubConfig?.() || {};
     try { window.HUB_NAME = cfg.name || window.HUB_NAME || "Badoc Hub"; window.HUB_CODE = cfg.code || window.HUB_CODE || "BADOC"; window.HUB_ID = Number(cfg.id || window.HUB_ID || 3); } catch (_) {}
     try { await NOL3FileStore?.ready?.(); } catch (error) { console.warn("NOL3: device storage restore initialization failed", error); }
-    try { NOL3FileStore?.switchHub?.(); } catch (_) {}
+    let restoredHub = null;
+    try { restoredHub = NOL3FileStore?.switchHub?.(); } catch (_) {}
     // LM is maintained by the existing date/hub-specific planning snapshot.
     // Clear the previous hub's live copy first so its rows cannot leak into the
     // newly selected hub when that hub has no local LM data.
@@ -18386,10 +18446,18 @@ NOL3.clearRiderData = async function () {
         await NOL3.loadLMHistoryForDate(d);
       }
     } catch (_) {}
+    // Tell the rest of the app that this hub's Incoming / From-To data is back
+    // (source "hub-local" so it is NOT treated as a new upload and not pushed).
+    try {
+      if (NOL3.incomingInventory?.rows?.length) window.dispatchEvent(new CustomEvent("inventoryloaded", { detail: { type: "incoming", data: NOL3.incomingInventory, source: "hub-local" } }));
+      if (NOL3.lineHaulInventory?.rows?.length) window.dispatchEvent(new CustomEvent("inventoryloaded", { detail: { type: "linehaul", data: NOL3.lineHaulInventory, source: "hub-local" } }));
+    } catch (_) {}
     try {
       if (typeof NOL3.refreshPlanningViews === "function") NOL3.refreshPlanningViews();
       if (typeof NOL3.renderBusinessDayMetrics === "function") NOL3.renderBusinessDayMetrics();
       if (typeof NOL3.renderTopbar === "function") NOL3.renderTopbar();
+      // Refresh the Inventory Upload page summaries for the restored hub.
+      if (typeof NOL3.updateInventoryUploadSummaries === "function") await NOL3.updateInventoryUploadSummaries();
     } catch (_) {}
   }
   window.addEventListener("hubchange", () => { setTimeout(() => restoreActiveHubRuntime(), 0); });
