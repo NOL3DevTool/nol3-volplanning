@@ -12364,6 +12364,14 @@ NOL3.pages.riders = function (root) {
   // file again. The Supabase roster channel is also hub-specific because each
   // hub writes to its own hub_data row.
   const RIDER_HUB_STORE_KEY = "nol3_rider_data_by_hub_v1";
+  // parseObject is defined later inside the cloud-sync IIFE, so it is NOT visible
+  // here. Use a local safe parser to avoid "parseObject is not defined".
+  const parseObject = (raw, fallback) => {
+    try {
+      const parsed = JSON.parse(raw || "");
+      return parsed && typeof parsed === "object" ? parsed : fallback;
+    } catch (_) { return fallback; }
+  };
   const getRiderHubStore = () => parseObject(NOL3Storage.get(RIDER_HUB_STORE_KEY), {});
   const getCurrentHubName = () => String((NOL3.getState && NOL3.getState().selectedHub) || HUB_NAME || "").trim();
   const saveRiderDataForHub = (result, hub = getCurrentHubName()) => {
