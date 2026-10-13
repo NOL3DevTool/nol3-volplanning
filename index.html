@@ -13503,7 +13503,7 @@ NOL3.pages.riders = function (root) {
     el.style.pointerEvents = "auto";
     el.style.cursor = "pointer";
     el.title = window.__NOL3_LAST_CLOUD_ERROR || "";
-    el.onclick = () => alert(`Cloud status: ${text}\n\nLast error: ${window.__NOL3_LAST_CLOUD_ERROR || "none"}\nHub: ${HUB_CODE}`);
+    el.onclick = () => alert(`Cloud status: ${text}\n\nLast error: ${window.__NOL3_LAST_CLOUD_ERROR || "none"}\nHub: ${HUB_CODE}\nWorker: ${r2BaseUrl()}`);
     el.style.opacity = good === null ? ".92" : good ? "1" : ".78";
   };
 
@@ -14101,7 +14101,7 @@ NOL3.pages.riders = function (root) {
       const stamps = await getRemoteStamps(true);
       startupStamp = Number(stamps[channel.dataType] || 0);
     } catch (e) {
-      console.warn("NOL3 cloud: startup stamp check failed", channel.dataType, e);
+      window.__NOL3_LAST_CLOUD_ERROR = String((e && e.message) || e); console.warn("NOL3 cloud: startup stamp check failed", channel.dataType, e);
     }
 
     const savedRemoteTime = Number(localStorage.getItem(channel.metaKey) || 0);
@@ -14413,7 +14413,7 @@ NOL3.pages.riders = function (root) {
         settingsOk = true;
         console.info("NOL3 startup: settings restore complete");
       } catch (error) {
-        console.error("NOL3 startup: settings restore failed", error);
+        window.__NOL3_LAST_CLOUD_ERROR = String((error && error.message) || error); console.error("NOL3 startup: settings restore failed", error);
       }
 
       try {
@@ -14421,7 +14421,7 @@ NOL3.pages.riders = function (root) {
         rosterOk = true;
         console.info("NOL3 startup: roster restore complete", { rows: NOL3?.riderData?.rows?.length || 0 });
       } catch (error) {
-        console.error("NOL3 startup: roster restore failed", error);
+        window.__NOL3_LAST_CLOUD_ERROR = String((error && error.message) || error); console.error("NOL3 startup: roster restore failed", error);
       }
 
       // Last-resort recovery: bypass the channel state machine completely and
@@ -14527,7 +14527,7 @@ NOL3.pages.riders = function (root) {
       }, 1500);
     }).catch(e => {
       window.__NOL3_CLOUD_STARTUP_SYNC = false;
-      console.error("NOL3 cloud configuration/startup failed", e);
+      window.__NOL3_LAST_CLOUD_ERROR = String((e && e.message) || e); console.error("NOL3 cloud configuration/startup failed", e);
       status("CLOUD CONFIG FAILED • RETRYING", false);
       startAdaptivePolling();
     });
