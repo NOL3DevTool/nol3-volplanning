@@ -9036,6 +9036,21 @@ NOL3.pages.planning = function (root) {
         return total;
       };
 
+      // Publish Planning's own numbers (same ones shown on the town chips / group totals)
+      // so Fleet Overview reads exactly what Planning shows.
+      try {
+        const snapGroups = new Map(), snapTowns = new Map();
+        NOL3.deliveryAreas.forEach(a => ensureAreaGroups(a).forEach(g => {
+          snapGroups.set(String(g.id), getTownGroupUniqueVolume(g));
+          (Array.isArray(g.towns) ? g.towns : []).forEach(k => {
+            const op = parseOperationalTownKey(k);
+            snapTowns.set(k, { town: op ? op.town : String(k), zone: op ? op.area : '', count: Number(chipCount(k) || 0) });
+          });
+        }));
+        NOL3._planningSnapshot = { groups: snapGroups, towns: snapTowns, hub: String((NOL3.getState && NOL3.getState().selectedHub) || '') };
+        NOL3._renderDeliveryAreas = renderDeliveryAreas;
+      } catch (_) {}
+
       NOL3.deliveryAreas.forEach(area => {
         const groups = ensureAreaGroups(area);
         const totalTowns = groups.reduce((sum, group) => sum + group.towns.length, 0);
@@ -15758,6 +15773,15 @@ NOL3.pages.riders = function (root) {
     return out;
   }
 
+  function planningSnapshot(){
+    try{
+      const hub=HUB_KEY();
+      let snap=NOL3._planningSnapshot;
+      if((!snap||snap.hub!==hub) && typeof NOL3._renderDeliveryAreas==='function'){ NOL3._renderDeliveryAreas(); snap=NOL3._planningSnapshot; }
+      return (snap && snap.hub===hub && snap.groups instanceof Map) ? snap : null;
+    }catch(e){return null;}
+  }
+
   function clusterRows(){
     syncPlanningAssignmentsFromStorage();
     const areas=Array.isArray(NOL3.deliveryAreas)?NOL3.deliveryAreas:[];
@@ -15770,7 +15794,13 @@ NOL3.pages.riders = function (root) {
       const riderDetails=new Map();
       (Array.isArray(area.groups)?area.groups:[]).forEach(g=>{
         let groupFloor=0, groupTransit=0;
-        (Array.isArray(g.towns)?g.towns:[]).forEach(key=>{const p=splitTownKey(key);groupFloor+=num(floor.get(p.town));groupTransit+=num(transit.get(p.town));});
+        const snap=planningSnapshot();
+        if(snap && snap.groups.has(String(g.id))){
+          groupFloor=num(snap.groups.get(String(g.id)));
+        } else {
+          (Array.isArray(g.towns)?g.towns:[]).forEach(key=>{const p=splitTownKey(key);groupFloor+=num(floor.get(p.town));});
+        }
+        (Array.isArray(g.towns)?g.towns:[]).forEach(key=>{const p=splitTownKey(key);groupTransit+=num(transit.get(p.town));});
         onFloor+=groupFloor;
         inT+=groupTransit;
 
@@ -15890,7 +15920,8 @@ NOL3.pages.riders = function (root) {
       (Array.isArray(area?.groups)?area.groups:[]).forEach(group=>{
         (Array.isArray(group?.towns)?group.towns:[]).forEach(key=>{
           const part=splitTownKey(key); if(!part.town)return;
-          const qty=num(floorTownCounts.get(part.town));
+          const snapT=planningSnapshot();
+          const qty=(snapT && snapT.towns.has(key)) ? num(snapT.towns.get(key).count) : num(floorTownCounts.get(part.town));
           topTownMap.set(part.town,(topTownMap.get(part.town)||0)+qty);
         });
       });
