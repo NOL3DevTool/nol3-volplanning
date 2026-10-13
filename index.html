@@ -13366,27 +13366,12 @@ NOL3.pages.riders = function (root) {
     },
     async applyRemote(data) {
       if (!data || !data.localState) return;
-      const localState = getHubState();
       const remoteState = data.localState;
-      const score = state => {
-        if (!state || typeof state !== "object") return 0;
-        let n = 0;
-        if (state.businessDate) n += 1;
-        if (state.businessDaySettings) n += 2;
-        if (state.fleetProductivity) n += 1;
-        if (state.frozenTodayVolume) n += 1;
-        if (state.weeklyDailySummary) n += 1;
-        if (hasArrayItems(state.planningLayout)) n += 3;
-        if (hasArrayItems(state.planningExceptions)) n += 2;
-        if (hasArrayItems(state.zoneClusterRules)) n += 2;
-        if (hasObjectKeys(state.zoneOverrides)) n += 2;
-        if (hasObjectKeys(state.zoneSettings)) n += 2;
-        if (hasObjectKeys(state.fleetOverview)) n += 2;
-        return n;
-      };
-      // Settings have no user-facing "clear all" action. Never replace a
-      // populated local settings state with a materially emptier cloud copy.
-      if (settingsHasMeaningfulData(localState) && score(remoteState) < score(localState)) return;
+      // The channel's timestamp/dirty-marker reconciliation already decides
+      // whether this cloud snapshot is newer. Do not compare how "full" the
+      // local and remote states look: legitimate edits can delete areas,
+      // assignments, overrides, rules, or clear values, and a score-based guard
+      // caused those valid remote changes to be silently rejected on other devices.
       applyHubState(remoteState);
       // During startup, the final page render is done once after Settings and
       // Riders have both been reconciled. Avoid rebuilding the Planning DOM
@@ -13700,7 +13685,11 @@ NOL3.pages.riders = function (root) {
     if (!state || typeof state !== "object") return;
     applyingRemote = true;
     try {
-      if (state.businessDate) NOL3Storage.set("nol3_business_day_date_v1", String(state.businessDate));
+      // Apply empty values too: an intentional clear on one device must clear
+      // the same setting on every other device instead of leaving stale local data.
+      if (Object.prototype.hasOwnProperty.call(state, "businessDate")) {
+        NOL3Storage.set("nol3_business_day_date_v1", String(state.businessDate || ""));
+      }
       if (state.businessDaySettings) {
         const store = parseObject(NOL3Storage.get("nol3_business_day_settings_v1"), {});
         let payload = parseObject(String(state.businessDaySettings), null);
@@ -13718,8 +13707,8 @@ NOL3.pages.riders = function (root) {
       if (Array.isArray(state.arrivedIncomingTasks)) {
         NOL3Storage.set("nol3_incoming_arrived_tasks_v1", JSON.stringify(state.arrivedIncomingTasks));
       }
-      if (state.fleetProductivity !== undefined && state.fleetProductivity !== "") {
-        NOL3Storage.set("nol3_fleet_productivity_v1:" + HUB_NAME, String(state.fleetProductivity));
+      if (state.fleetProductivity !== undefined) {
+        NOL3Storage.set("nol3_fleet_productivity_v1:" + HUB_NAME, String(state.fleetProductivity || ""));
       }
       if (Array.isArray(state.planningExceptions)) {
         NOL3Storage.set("nol3_planning_exceptions_v1:" + HUB_NAME, JSON.stringify(state.planningExceptions));
@@ -13783,11 +13772,11 @@ NOL3.pages.riders = function (root) {
         store[HUB_NAME] = state.zoneClusterRules;
         NOL3Storage.set("nol3_zone_cluster_rules_v1", JSON.stringify(store));
       }
-      if (state.weeklyDailySummary) {
-        NOL3Storage.set(`NOL3_WEEKLY_DAILY_SUMMARY_${HUB_NAME}`, String(state.weeklyDailySummary));
+      if (state.weeklyDailySummary !== undefined) {
+        NOL3Storage.set(`NOL3_WEEKLY_DAILY_SUMMARY_${HUB_NAME}`, String(state.weeklyDailySummary || ""));
       }
-      if (state.frozenTodayVolume) {
-        NOL3Storage.set(`nol3_frozen_today_volume_v1:${HUB_CODE}`, String(state.frozenTodayVolume));
+      if (state.frozenTodayVolume !== undefined) {
+        NOL3Storage.set(`nol3_frozen_today_volume_v1:${HUB_CODE}`, String(state.frozenTodayVolume || ""));
       }
     } finally {
       applyingRemote = false;
@@ -13920,9 +13909,11 @@ NOL3.pages.riders = function (root) {
   // 2) One tiny request covers all three channels.
   // 3) No polling while the tab is hidden; slower when nobody is touching it.
   // 4) A device never re-downloads a snapshot it just pushed itself.
-  const POLL_ACTIVE_MS = 180000;  // every 3 min while active
-  const POLL_IDLE_MS = 600000;    // every 10 min while idle
-  const IDLE_AFTER_MS = 300000;
+  // Keep the small timestamp-only poll frequent enough for collaborative use.
+  // The payload itself is downloaded only when its cloud stamp changes.
+  const POLL_ACTIVE_MS = 15000;   // every 15 sec while active
+  const POLL_IDLE_MS = 60000;     // every 60 sec while idle
+  const IDLE_AFTER_MS = 120000;
   let lastActivityAt = Date.now();
   ["pointerdown", "keydown", "touchstart"].forEach(ev =>
     window.addEventListener(ev, () => { lastActivityAt = Date.now(); }, { passive: true, capture: true }));
@@ -14797,25 +14788,39 @@ NOL3.pages.riders = function (root) {
     list.forEach(t => { if (t === "all") Object.values(propOf).forEach(v => cleared.add(v)); else if (propOf[t]) cleared.add(propOf[t]); });
     if (!cleared.size) return false;
 
-    // Delete the whole file object from the R2 bucket so nothing is left to sync.
-    const deleteFilesObject = async () => {
+    // Publish a clear tombstone instead of deleting the R2 object. If the object
+    // disappears, the stamp endpoint has no version to announce, so other clients
+    // cannot tell a deliberate CLEAR from a never-uploaded inventory and keep stale
+    // local rows. A versioned tombstone propagates the clear to every open device.
+    const publishFilesTombstone = async () => {
       const ctxCode = HUB_CODE;
-      await r2Raw.deleteRow(ctxCode, filesChannel.dataType);
-      if (ctxCode !== HUB_CODE) return true; // hub switched mid-request; nothing local to update
       const now = Date.now();
+      const tombstone = {
+        version: 4,
+        hubId: HUB_ID,
+        hubName: HUB_NAME,
+        hubCode: ctxCode,
+        clientUpdatedAt: now,
+        clearedAt: now,
+        clearedByUser: true,
+        lmInventory: null,
+        incomingInventory: null,
+        lineHaulInventory: null,
+        arrivedIncomingTasks: []
+      };
+      await pushSnapshotFor(filesChannel, tombstone);
+      if (ctxCode !== HUB_CODE) return true; // hub switched mid-request; don't update the new hub's local markers
       filesChannel.initialized = true;
-      filesChannel.lastStamp = 0;
       filesChannel.lastRemoteUpdatedAt = now;
       filesChannel.lastLocalMutationAt = now;
-      filesChannel.lastRemoteClearedByUser = false;
+      filesChannel.lastRemoteClearedByUser = true;
       try { localStorage.setItem(filesChannel.metaKey, String(now)); } catch (_) {}
       clearLocalDirty(LOCAL_FILES_DIRTY_KEY);
-      invalidateStamps();
       return true;
     };
 
-    // Everything cleared (the main CLEAR button) -> delete the object, no read needed.
-    if (cleared.size >= Object.keys(propOf).length) return deleteFilesObject();
+    // Everything cleared (the main CLEAR button) -> publish a tombstone.
+    if (cleared.size >= Object.keys(propOf).length) return publishFilesTombstone();
 
     const cur = await readRemoteFor(filesChannel);
     let snap = await filesChannel.buildSnapshot();
@@ -14823,9 +14828,10 @@ NOL3.pages.riders = function (root) {
     cleared.forEach(k => { snap[k] = null; });
     if (cleared.has("incomingInventory")) snap.arrivedIncomingTasks = [];
 
-    // Partial clear that leaves the bucket object completely empty -> delete it too.
+    // Partial clear that leaves no datasets also needs a versioned tombstone;
+    // otherwise other devices have no cloud stamp to detect the clear.
     const hasData = v => !!(v && ((Array.isArray(v.rows) && v.rows.length) || v.fileName || v.rawText));
-    if (!Object.values(propOf).some(k => hasData(snap[k]))) return deleteFilesObject();
+    if (!Object.values(propOf).some(k => hasData(snap[k]))) return publishFilesTombstone();
 
     snap.clearedByUser = true;
     snap.clearedAt = Date.now();
