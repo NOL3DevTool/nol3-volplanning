@@ -6070,6 +6070,9 @@ NOL3.pages.planning = function (root) {
       const townIndex = findIncomingHeaderIndex(ih, ["Town Name", "Town", "Municipality", "Destination Town", "Destination Municipality", "Destination City", "Receiver Town"]);
       const destinationIndex = findIncomingHeaderIndex(ih, ["Destination Station", "Destination Station Name", "Destination Hub", "To Station", "To Hub", "Destination Station Code"]);
       const taskIndex = findIncomingHeaderIndex(lh, ["LH Trip Number", "LH Trip ID", "LH Trip", "Line Haul Trip Number", "Linehaul Trip Number", "Line Haul Trip ID", "Linehaul Trip ID", "Line Haul Task ID", "Linehaul Task ID", "Line Haul Task", "Linehaul Task", "Task ID", "Task", "Linehaul"]);
+      const zoneIdxIncoming = findIncomingHeaderIndex(ih, ["Zone ID", "Zone Id", "ZoneID"]);
+      const taskTownZones = new Map(); // task -> town -> zone -> count
+      taskTownCounts.zones = taskTownZones;
       const spxIndex = findIncomingHeaderIndex(lh, ["SPX TN", "SPX Tracking Number", "SLS TN", "SLS Tracking Number", "Tracking Number", "Tracking No", "Tracking ID"]);
       if (orderIndex < 0 || townIndex < 0 || taskIndex < 0 || spxIndex < 0) return taskTownCounts;
 
@@ -6115,6 +6118,14 @@ NOL3.pages.planning = function (root) {
           if (!taskTownCounts.has(task)) taskTownCounts.set(task, new Map());
           const counts = taskTownCounts.get(task);
           counts.set(town, (counts.get(town) || 0) + 1);
+          if (zoneIdxIncoming >= 0) {
+            const zoneVal = String(row[zoneIdxIncoming] ?? "").replace(/^\uFEFF/, "").trim();
+            if (!taskTownZones.has(task)) taskTownZones.set(task, new Map());
+            const tz = taskTownZones.get(task);
+            if (!tz.has(town)) tz.set(town, new Map());
+            const zm = tz.get(town);
+            zm.set(zoneVal, (zm.get(zoneVal) || 0) + 1);
+          }
         });
       });
 
@@ -6178,6 +6189,35 @@ NOL3.pages.planning = function (root) {
         </div>`;
       updateIncomingOrdersButton();
       updateIncomingOrdersNotification();
+    };
+
+    // Town -> Zone ID -> count for a set of linehaul tasks (uses the Zone ID that
+    // is already in the uploaded inventory rows).
+    const sumZoneCountsForTasks = (tasks) => {
+      const result = new Map();
+      const zonesByTask = getIncomingLinehaulTownCounts().zones;
+      if (!(zonesByTask instanceof Map)) return result;
+      tasks.forEach(task => {
+        const tz = zonesByTask.get(task);
+        if (!tz) return;
+        tz.forEach((zm, town) => {
+          if (!result.has(town)) result.set(town, new Map());
+          const out = result.get(town);
+          zm.forEach((n, zone) => out.set(zone, (out.get(zone) || 0) + n));
+        });
+      });
+      return result;
+    };
+    const getArrivedIncomingTownZoneCounts = () => sumZoneCountsForTasks(getArrivedIncomingTasks());
+    const getIncomingTownZoneCounts = () => {
+      const arrived = getArrivedIncomingTasks();
+      const active = new Set((selectedIncomingLinehauls || []).map(v => String(v || '').trim()).filter(Boolean));
+      try {
+        if (typeof NOL3.getLHIncomingBeforeCotTasks === 'function') {
+          NOL3.getLHIncomingBeforeCotTasks().forEach(t => active.add(String(t || '').trim()));
+        }
+      } catch (_) {}
+      return sumZoneCountsForTasks([...active].filter(t => t && !arrived.has(t)));
     };
 
     const getIncomingTownCounts = () => {
@@ -7321,7 +7361,7 @@ NOL3.pages.planning = function (root) {
           const lk = String(v.baseTown || k).trim().toLowerCase();
           if (!v.splitArea && !zoneLookup.has(lk)) zoneLookup.set(lk, k);
         });
-        const addIncomingZoneMode = (sourceCounts) => {
+        const addIncomingZoneMode = (sourceCounts, zoneSource) => {
           if (!(sourceCounts instanceof Map)) return;
           sourceCounts.forEach((count, town) => {
             const parsed = parseTownValue(town);
@@ -7336,10 +7376,15 @@ NOL3.pages.planning = function (root) {
               zoneLookup.set(parsed.toLowerCase(), baseTown);
             }
             item.incomingCount = Number(item.incomingCount || 0) + n;
+            const zm = zoneSource instanceof Map ? zoneSource.get(town) : null;
+            if (zm instanceof Map) {
+              if (!(item.incomingZones instanceof Map)) item.incomingZones = new Map();
+              zm.forEach((zn, zone) => item.incomingZones.set(zone, (item.incomingZones.get(zone) || 0) + zn));
+            }
           });
         };
-        if (showIncomingOrdersOnFloor) addIncomingZoneMode(getIncomingTownCounts());
-        addIncomingZoneMode(getArrivedIncomingTownCounts());
+        if (showIncomingOrdersOnFloor) addIncomingZoneMode(getIncomingTownCounts(), getIncomingTownZoneCounts());
+        addIncomingZoneMode(getArrivedIncomingTownCounts(), getArrivedIncomingTownZoneCounts());
         displayItems = [...authoritativeTownDisplay.values()];
       }
 
@@ -7467,27 +7512,25 @@ NOL3.pages.planning = function (root) {
             ? assignedTowns.has(item.town)
             : assignedTowns.has(item.baseTown);
           if (itemIsAssigned) return;
-          const zones = getItemZoneBreakdown(item);
-          if (!zones || !zones.size) {
-            const bucket = zoneGroups.get('No Zone ID') || { total: 0, items: [] };
-            bucket.total += item.count + (item.incomingCount || 0);
-            bucket.items.push({ item, count: item.count + (item.incomingCount || 0) });
-            zoneGroups.set('No Zone ID', bucket);
-            return;
+          const zones = getItemZoneBreakdown(item) || new Map();
+          // LM orders per Zone ID, plus Incoming/Arrived orders per THEIR OWN
+          // Zone ID (from the uploaded file). Only orders with a blank Zone ID
+          // (or no Zone ID column) fall into "No Zone ID".
+          const combined = new Map();
+          const addZ = (zoneId, n) => { if (n > 0) combined.set(zoneId, (combined.get(zoneId) || 0) + n); };
+          if (zones.size) zones.forEach((count, zoneId) => addZ(zoneId, count));
+          else addZ('No Zone ID', Number(item.count || 0));
+          let incomingPlaced = 0;
+          if (item.incomingZones instanceof Map) {
+            item.incomingZones.forEach((n, zoneId) => { addZ(zoneId || 'No Zone ID', n); incomingPlaced += n; });
           }
-          zones.forEach((count, zoneId) => {
+          addZ('No Zone ID', Math.max(0, Number(item.incomingCount || 0) - incomingPlaced));
+          combined.forEach((count, zoneId) => {
             const bucket = zoneGroups.get(zoneId) || { total: 0, items: [] };
             bucket.total += count;
             bucket.items.push({ item, count });
             zoneGroups.set(zoneId, bucket);
           });
-          // Incoming/Arrived orders carry no Zone ID: show them under "No Zone ID".
-          if (Number(item.incomingCount || 0) > 0) {
-            const bucket = zoneGroups.get('No Zone ID') || { total: 0, items: [] };
-            bucket.total += Number(item.incomingCount);
-            bucket.items.push({ item, count: Number(item.incomingCount) });
-            zoneGroups.set('No Zone ID', bucket);
-          }
         });
         let groupEntries = [...zoneGroups.entries()].sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
         if (zoneFilterText) groupEntries = groupEntries.filter(([zoneId]) => zoneId.toLowerCase().includes(zoneFilterText));
@@ -12734,7 +12777,7 @@ NOL3.pages.riders = function (root) {
         const unifiedSummary = document.getElementById('unifiedInventorySummary');
         const unifiedStatus = document.getElementById('unifiedInventoryStatus');
         if (unifiedSummary) unifiedSummary.textContent = unifiedName;
-        if (unifiedStatus && !unifiedStatus.textContent.trim()) unifiedStatus.textContent = `${((NOL3.lmInventory?.rows?.length || 0) + (NOL3.incomingInventory?.rows?.length || 0)).toLocaleString()} records loaded`;
+        if (unifiedStatus && (!unifiedStatus.textContent.trim() || unifiedStatus.textContent.trim() === 'No inventory loaded')) unifiedStatus.textContent = `${((NOL3.lmInventory?.rows?.length || 0) + (NOL3.incomingInventory?.rows?.length || 0)).toLocaleString()} records loaded`;
         const clearBtnEl = document.getElementById("clearUnifiedInventoryBtn");
         if (clearBtnEl) clearBtnEl.disabled = false;
       }
@@ -14086,8 +14129,34 @@ NOL3.pages.riders = function (root) {
         await loadCloudConfig();
         await initialSyncChannel(settingsChannel);
         await initialSyncChannel(rosterChannel);
-        try { await initialSyncChannel(filesChannel); } catch (error) { console.warn("NOL3: selected hub inventory restore failed", error); }
+        // The device copy is the source of truth for inventory. Only download the
+        // hub's inventory from the cloud when this device has NONE saved for it.
+        // (Previously every hub switch downloaded the full snapshot - the "MB
+        // used" counter - and could replace newer local data with an older copy.)
+        let deviceHasInventory = false;
+        try {
+          await window.NOL3FileStore?.ready?.();
+          window.NOL3FileStore?.switchHub?.();
+          deviceHasInventory = ["unifiedInventory", "lm", "incoming", "linehaul"].some(t => {
+            const r = window.NOL3FileStore?.get?.(t);
+            return !!(r && r.dataset && ((Array.isArray(r.dataset.rows) && r.dataset.rows.length) || r.dataset.fileName));
+          });
+        } catch (_) {}
+        if (deviceHasInventory) {
+          try {
+            const stamps = await getRemoteStamps(true);
+            const st = Number(stamps[filesChannel.dataType] || 0);
+            filesChannel.initialized = true;
+            filesChannel.lastStamp = st;
+            filesChannel.lastRemoteUpdatedAt = st;
+            filesChannel.lastLocalMutationAt = Math.max(st, Date.now());
+            filesChannel.lastHash = `device-first:${st}`;
+          } catch (_) { filesChannel.initialized = true; }
+        } else {
+          try { await initialSyncChannel(filesChannel); } catch (error) { console.warn("NOL3: selected hub inventory restore failed", error); }
+        }
         if (typeof NOL3.renderPage === "function") NOL3.renderPage(NOL3.getState()?.currentPage || "planning");
+        try { if (typeof NOL3.updateInventoryUploadSummaries === "function") await NOL3.updateInventoryUploadSummaries(); } catch (_) {}
       } catch (error) { console.warn("NOL3: selected hub cloud restore failed", error); }
     }, 0);
   });
