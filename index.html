@@ -22,7 +22,7 @@
 
 *{box-sizing:border-box}
 
-html{zoom:80%;}
+html{zoom:75%;}
 
 html,body{margin:0;min-height:100%;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 body{background:var(--bg);color:var(--text)}
@@ -2771,20 +2771,49 @@ th{color:#667085;font-weight:650}
  * to be changed; the dashboard logic can remain intact.
  */
 window.NOL3Storage = (() => {
+  // Values that could NOT be written to localStorage (quota full / blocked) are
+  // kept here so the running page stays consistent, but they are lost on refresh.
+  // The previous version did this silently, which looked like "settings reset
+  // when refreshed". Now the user is told, and reads prefer these values.
   const memory = new Map();
+  let warned = false;
+
+  const showStorageWarning = () => {
+    window.__NOL3_STORAGE_FAILED = true;
+    if (warned) return;
+    warned = true;
+    const make = () => {
+      if (document.getElementById("nol3StorageWarn")) return;
+      const d = document.createElement("div");
+      d.id = "nol3StorageWarn";
+      d.style.cssText = "position:fixed;left:16px;right:16px;top:12px;z-index:100000;padding:10px 14px;border-radius:10px;background:#b91c1c;color:#fff;font:600 13px/1.35 Arial,sans-serif;box-shadow:0 6px 20px rgba(0,0,0,.25);cursor:pointer";
+      d.textContent = "Browser storage is full or blocked: recent settings are NOT being saved on this device and will be lost on refresh. Clear old site data for this page, then reload. (click to dismiss)";
+      d.onclick = () => d.remove();
+      document.body.appendChild(d);
+    };
+    if (document.body) make(); else document.addEventListener("DOMContentLoaded", make, { once: true });
+  };
 
   const localGet = (key) => {
+    if (memory.has(key)) return memory.get(key);
     try { return localStorage.getItem(key); }
-    catch (_) { return memory.has(key) ? memory.get(key) : null; }
+    catch (_) { return null; }
   };
   const localSet = (key, value) => {
-    try { localStorage.setItem(key, value); }
-    catch (_) { memory.set(key, String(value)); }
+    try { localStorage.setItem(key, value); memory.delete(key); }
+    catch (err) {
+      memory.set(key, String(value));
+      console.error("NOL3Storage: localStorage write failed for", key, err);
+      showStorageWarning();
+    }
   };
   const localRemove = (key) => {
+    memory.delete(key);
     try { localStorage.removeItem(key); }
-    catch (_) { memory.delete(key); }
+    catch (_) {}
   };
+
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (_) {}
 
   return {
     get(key) { return localGet(key); },
@@ -5930,7 +5959,9 @@ NOL3.pages.planning = function (root) {
       (NOL3.getState && NOL3.getState().selectedHub) || "";
 
     const parseTownValue = (value) => {
-      const text = String(value || "").trim();
+      // Strip BOM / zero-width / non-breaking spaces and collapse repeated spaces so the
+      // same town in the LM, Incoming and Linehaul exports resolves to one key.
+      const text = String(value || "").replace(/[\u200B-\u200D\uFEFF]/g, "").replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
       if (!text) return "Unknown";
       return text;
     };
@@ -6009,6 +6040,15 @@ NOL3.pages.planning = function (root) {
       "town name", "town", "municipality", "destination town", "destination municipality",
       "destination city", "destination", "receiver town"
     ], null);
+
+    // Town column lookup that accepts the same header variants everywhere.
+    // Several places used an exact 'town name' match, so exports with a
+    // different header showed no towns / counts.
+    const findTownColumnSafe = (rawHeaders, lowerHeaders) => {
+      let i = -1;
+      try { i = findTownColumn(rawHeaders); } catch (_) {}
+      return i >= 0 ? i : lowerHeaders.indexOf('town name');
+    };
 
     let showIncomingOrdersOnFloor = false;
     let selectedIncomingLinehauls = [];
@@ -6182,7 +6222,7 @@ NOL3.pages.planning = function (root) {
       const normalizeStatus = value => String(value ?? '').replace(/^\uFEFF/, '').trim().toUpperCase().replace(/[\s_-]+/g, ' ');
       const headers = lm.headers.map(normalizeHeader);
       const exceptionSet = getPlanningExceptionSet();
-      const townIndex = headers.indexOf('town name');
+      const townIndex = findTownColumnSafe(lm.headers, headers);
       const zoneIndex = headers.indexOf('zone id');
       const statusCandidates = ['spx status','status','parcel status','order status'];
       const statusIndex = statusCandidates.map(name => headers.indexOf(name)).find(index => index >= 0) ?? -1;
@@ -7234,18 +7274,35 @@ NOL3.pages.planning = function (root) {
       if (mode === 'town') {
         const townDisplay = new Map(authoritativeTownDisplay);
 
+        // Case-insensitive link between Incoming town names and LM town names.
+        const townKeyLookup = new Map();
+        townDisplay.forEach((v, k) => {
+          const lk = String(v.baseTown || k).trim().toLowerCase();
+          if (!v.splitArea && !townKeyLookup.has(lk)) townKeyLookup.set(lk, k);
+        });
         const addIncomingToTown = (sourceCounts) => {
           if (!(sourceCounts instanceof Map)) return;
           sourceCounts.forEach((count, town) => {
-            const baseTown = parseTownValue(town);
-            if (!baseTown || getOperationalTownDefinitions(baseTown).length) return;
-            if (assignedTowns.has(baseTown)) return;
-            const item = townDisplay.get(baseTown);
-            if (item) item.incomingCount += Number(count || 0);
+            const parsed = parseTownValue(town);
+            const n = Number(count || 0);
+            if (!parsed || !n) return;
+            const lk = parsed.toLowerCase();
+            const baseTown = townKeyLookup.get(lk) || parsed;
+            if (assignedTowns.has(baseTown) || assignedTowns.has(parsed)) return;
+            let item = townDisplay.get(baseTown);
+            if (!item) {
+              // A town that only has incoming orders (no LM parcels yet) used to be
+              // dropped here, while Total Volume still counted it.
+              item = { town: baseTown, displayTown: baseTown, baseTown, splitArea: '', count: 0, incomingCount: 0 };
+              townDisplay.set(baseTown, item);
+              townKeyLookup.set(lk, baseTown);
+            }
+            item.incomingCount += n;
           });
         };
 
-        if (showIncomingOrdersOnFloor && Array.isArray(selectedIncomingLinehauls) && selectedIncomingLinehauls.length > 0) {
+        // Manual selection AND auto-incoming (LH ETA before COT) both count.
+        if (showIncomingOrdersOnFloor) {
           addIncomingToTown(getIncomingTownCounts());
         }
         addIncomingToTown(getArrivedIncomingTownCounts());
@@ -7666,7 +7723,7 @@ NOL3.pages.planning = function (root) {
       const lm = NOL3.lmInventory;
       if (!lm || !lm.filteredRows || !lm.headers) return [];
       const headers = lm.headers.map(h => String(h || '').trim().toLowerCase());
-      const townIndex = headers.indexOf('town name');
+      const townIndex = findTownColumnSafe(lm.headers, headers);
       if (townIndex < 0) return [];
       const set = new Set();
       lm.filteredRows.forEach(row => {
@@ -8682,7 +8739,7 @@ NOL3.pages.planning = function (root) {
       const lm = (typeof NOL3.getPlanningLMInventoryV10 === "function" ? NOL3.getPlanningLMInventoryV10() : NOL3.lmInventory);
       if (lm && Array.isArray(lm.filteredRows) && Array.isArray(lm.headers)) {
         const headers = lm.headers.map(h => String(h || '').trim().toLowerCase());
-        const townIndex = headers.indexOf('town name');
+        const townIndex = findTownColumnSafe(lm.headers, headers);
         const zoneIndex = headers.indexOf('zone id');
         if (townIndex >= 0) {
           const exceptionSet = getPlanningExceptionSet();
@@ -8707,12 +8764,16 @@ NOL3.pages.planning = function (root) {
       // When an incoming linehaul is selected, add its incoming town counts
       // to the existing On-Floor town counts, including towns already assigned
       // to Delivery Areas/Town Groups.
-      if (showIncomingOrdersOnFloor && Array.isArray(selectedIncomingLinehauls) && selectedIncomingLinehauls.length > 0) {
+      if (showIncomingOrdersOnFloor) {
         const incomingCounts = getIncomingTownCounts();
+        const lowerKeys = new Map();
+        townCounts.forEach((_, k) => { const lk = String(k).toLowerCase(); if (!lowerKeys.has(lk)) lowerKeys.set(lk, k); });
         incomingCounts.forEach((count, town) => {
           const normalizedTown = parseTownValue(town);
           if (!normalizedTown) return;
-          townCounts.set(normalizedTown, (townCounts.get(normalizedTown) || 0) + Number(count || 0));
+          const key = lowerKeys.get(normalizedTown.toLowerCase()) || normalizedTown;
+          townCounts.set(key, (townCounts.get(key) || 0) + Number(count || 0));
+          lowerKeys.set(key.toLowerCase(), key);
         });
       }
 
@@ -13103,13 +13164,11 @@ NOL3.pages.riders = function (root) {
 
 <script>
 /* NOL3 Cloud Sync — Badoc Hub
- * Firebase-primary sync with low-CPU/low-bandwidth polling.
- * Simple device-to-device synchronization through Supabase.
- * This intentionally uses the Supabase publishable key in the browser.
- * Do not put a secret/service_role key here.
+ * Cloudflare R2 (through a Worker) sync with low-CPU/low-bandwidth polling.
+ * Cloud records are keyed by the hub CODE (e.g. BADOC), never by a numeric ID.
+ * The shared access key is typed in once per browser and is NOT stored in this file.
  */
 (function () {
-  const SUPABASE_URL = "https://uduaxxwzpxwytekejito.supabase.co";
   const initialHubCfg = NOL3.getSelectedHubConfig?.() || { id:3, name:"Badoc Hub", code:"BADOC" };
   let HUB_ID = Number(initialHubCfg.id || 3);
   let HUB_NAME = String(initialHubCfg.name || "Badoc Hub");
@@ -13214,7 +13273,7 @@ NOL3.pages.riders = function (root) {
 
   const rosterChannel = makeChannel({
     dataType: "app_state_roster",
-    metaKey: "NOL3_CLOUD_LAST_APPLIED_BADOC_ROSTER",
+    metaKey: `NOL3_CLOUD_LAST_APPLIED_${HUB_CODE}_ROSTER`,
     pollMs: 5000,
     debounceMs: 1200,
     async buildSnapshot() {
@@ -13288,7 +13347,7 @@ NOL3.pages.riders = function (root) {
   // no startup restore, polling, or upload push uses this channel.
   const filesChannel = makeChannel({
     dataType: "app_state_files",
-    metaKey: "NOL3_CLOUD_LAST_APPLIED_BADOC_FILES",
+    metaKey: `NOL3_CLOUD_LAST_APPLIED_${HUB_CODE}_FILES`,
     pollMs: 5000,
     debounceMs: 3000,
     async buildSnapshot() {
@@ -13424,7 +13483,9 @@ NOL3.pages.riders = function (root) {
     }
     const rawStatus = String(text || "").toUpperCase();
     let simpleStatus = "SYNC ISSUE";
-    if (rawStatus.includes("OFFLINE") || rawStatus.includes("DISCONNECTED") || rawStatus.includes("UNAVAILABLE")) {
+    if (rawStatus.includes("LOCAL ONLY")) {
+      simpleStatus = "LOCAL ONLY";
+    } else if (rawStatus.includes("OFFLINE") || rawStatus.includes("DISCONNECTED") || rawStatus.includes("UNAVAILABLE")) {
       simpleStatus = "OFFLINE";
     } else if (rawStatus.includes("RETRY") || rawStatus.includes("ERROR") || rawStatus.includes("FAIL")) {
       simpleStatus = "SYNC ISSUE";
@@ -13438,38 +13499,16 @@ NOL3.pages.riders = function (root) {
       simpleStatus = "CONNECTING";
     }
     el.textContent = `${simpleStatus} • ${egressLabel()}`;
+    // Click the pill to see the real reason behind OFFLINE / SYNC ISSUE.
+    el.style.pointerEvents = "auto";
+    el.style.cursor = "pointer";
+    el.title = window.__NOL3_LAST_CLOUD_ERROR || "";
+    el.onclick = () => alert(`Cloud status: ${text}\n\nLast error: ${window.__NOL3_LAST_CLOUD_ERROR || "none"}\nHub: ${HUB_CODE}`);
     el.style.opacity = good === null ? ".92" : good ? "1" : ".78";
   };
 
-  // Hardcoded so this device (and every future copy of this file) connects
-  // automatically with no key-entry prompt. This is a Supabase *publishable*
-  // key, which is safe to ship in client-side code by design (unlike a
-  // secret/service_role key) — it's the same key that was previously typed
-  // into the connect modal, just no longer requested at runtime.
-  const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_mECx0rqIkWPy_QjPqNIVrw_z3Mv9H_R";
-
-  const getSupabaseKey = () => SUPABASE_PUBLISHABLE_KEY;
-  // Firebase is the primary cloud. Supabase remains available only as a fallback.
-  // There is intentionally NO dual-write/mirror in this build.
-  // `configured()` stays true because Firebase does not require a browser API key.
-  const configured = () => !!SUPABASE_URL.startsWith("https://") && !!getSupabaseKey();
-
-  const api = async (path, options = {}) => {
-    const supabaseKey = getSupabaseKey();
-    if (!supabaseKey) throw new Error("Supabase publishable key has not been added yet.");
-    const response = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
-      ...options,
-      headers: {
-        apikey: supabaseKey,
-        "Content-Type": "application/json",
-        ...(options.headers || {})
-      }
-    });
-    const text = await response.text();
-    trackEgress(text.length);
-    if (!response.ok) throw new Error(`${response.status}: ${text || response.statusText}`);
-    return text ? JSON.parse(text) : null;
-  };
+  // Cloud is enabled only when the Worker URL is set and an access key is present.
+  const configured = () => r2Configured();
 
   function readIndexedDB() {
     return Promise.resolve(window.NOL3FileStore ? NOL3FileStore.getAll() : []);
@@ -13614,231 +13653,114 @@ NOL3.pages.riders = function (root) {
     try { return JSON.stringify(value); } catch (_) { return String(Date.now()); }
   }
 
-  // ===== PROVIDER SWITCH =====
-  // Firebase Realtime Database is the PRIMARY cloud for Badoc Hub.
-  // Supabase is used ONLY as a fallback if Firebase becomes unavailable.
-  // There is NO mirror / dual-write. While Firebase is healthy, Supabase is
-  // not written to by this page.
+  // ===== CLOUDFLARE R2 BACKEND =====
+  // Single backend: Cloudflare Worker -> R2 bucket (binding FILES_BUCKET).
+  // There is NO fallback provider on purpose: the old Firebase->Supabase failover
+  // could leave two devices of the same hub reading different copies of the data.
   //
-  // cloud-config.json (next to the hub page on GitHub):
-  //   {
-  //     "provider": "firebase",
-  //     "firebaseUrl": "https://<db>.firebasedatabase.app",
-  //     "mirror": false,
-  //     "fallbackProvider": "supabase"
-  //   }
-  // Firebase failures temporarily switch this device to Supabase for 6 hours.
-  // After the failover window expires, the page automatically tries Firebase
-  // again.
-  const CFG_KEY = "NOL3_CLOUD_CFG";
-  let FAILOVER_KEY = `NOL3_CLOUD_FAILOVER_${HUB_CODE}`;
-  const FAILOVER_MS = 5 * 60 * 1000;
-  const FIREBASE_TIMEOUT_MS = 8000;
-  const DEFAULT_FIREBASE_URL = "https://nol3-backup-default-rtdb.asia-southeast1.firebasedatabase.app";
-  const EMBEDDED_CLOUD_CFG = {
-    provider: "firebase",
-    firebaseUrl: DEFAULT_FIREBASE_URL,
-    mirror: false,
-    fallbackProvider: "supabase",
-    hubs: {}
-  };
-  // Never let an old file:// localStorage setting override this build's
-  // embedded provider configuration. GitHub/HTTPS may override it from
-  // cloud-config.json below.
-  let cloudCfg = { ...EMBEDDED_CLOUD_CFG };
+  // >>> EDIT THIS LINE after you deploy the Worker <<<
+  const R2_WORKER_URL = "https://white-dust-9780.xenerycenery1.workers.dev";
+
+  const R2_TIMEOUT_MS = 15000;
+  const R2_TOKEN_KEY = "NOL3_R2_ACCESS_KEY";
+  let FAILOVER_KEY = `NOL3_CLOUD_FAILOVER_${HUB_CODE}`; // legacy name, kept so older code paths stay valid
+  let cloudCfg = {};
   let cfgLoadedAt = 0;
-  let lastActive = "";
 
-  function wantedProvider() {
-    return String((cloudCfg.hubs && cloudCfg.hubs[HUB_CODE]) || cloudCfg.provider || "firebase").toLowerCase();
-  }
-  function fallbackProvider() {
-    return String(cloudCfg.fallbackProvider || "supabase").toLowerCase() === "firebase" ? "supabase" : "supabase";
-  }
-  function activeProvider() {
-    try {
-      const failUntil = Number(localStorage.getItem(FAILOVER_KEY) || 0);
-      if (Date.now() < failUntil) return fallbackProvider();
-      if (wantedProvider() === "supabase") return "supabase";
-      if (wantedProvider() === "firebase" && cloudCfg.firebaseUrl) return "firebase";
-    } catch (_) {}
-    return "supabase";
-  }
-  function mirrorName() {
-    // Deliberately disabled: Firebase is primary and Supabase is fallback-only.
-    return null;
-  }
-  function activateSupabaseFallback(error) {
-    try {
-      localStorage.setItem(FAILOVER_KEY, String(Date.now() + FAILOVER_MS));
-    } catch (_) {}
-    invalidateStamps();
-    lastActive = "supabase";
-    console.warn("NOL3 cloud: Firebase unavailable; switching to Supabase fallback", error);
-    try { status("FIREBASE FAILED • SUPABASE BACKUP", false); } catch (_) {}
+  const r2BaseUrl = () => String(cloudCfg.workerUrl || R2_WORKER_URL || "").replace(/\/+$/, "");
+  const r2UrlLooksConfigured = () => /^https:\/\//i.test(r2BaseUrl()) && !/YOUR-/i.test(r2BaseUrl());
+  // Staff never type anything: the key is built into the page and sent automatically.
+  // It must equal API_TOKEN in the Cloudflare Worker. It is NOT secret (anyone can view
+  // this file's source); it only keeps random internet traffic away from the Worker.
+  const R2_ACCESS_KEY = "a1237qweyasdq6wt1278qwge71237y8qye";
+  const getAccessKey = () => String(R2_ACCESS_KEY || "").trim();
+  function r2Configured() { return r2UrlLooksConfigured() && !!getAccessKey(); }
+
+  function ensureAccessKey() { /* no login / prompt: key is built in */ }
+  function forgetAccessKey() {
+    try { localStorage.removeItem(R2_TOKEN_KEY); sessionStorage.removeItem("NOL3_R2_KEY_ASKED"); } catch (_) {}
   }
 
-  async function runCloudBackend(method, ...args) {
-    const provider = activeProvider();
-    try {
-      return await backendFor(provider)[method](...args);
-    } catch (error) {
-      if (provider === "firebase") {
-        activateSupabaseFallback(error);
-        return await backendFor("supabase")[method](...args);
-      }
-      throw error;
-    }
-  }
-
-  const sbRaw = {
-    async readStamps() {
-      const rows = await api(`hub_data?hub_id=eq.${HUB_ID}&select=data_type,updated_at`);
-      const map = {};
-      (Array.isArray(rows) ? rows : []).forEach(r => { map[r.data_type] = Date.parse(r.updated_at) || 0; });
-      return map;
-    },
-    async readRow(dataType) {
-      const rows = await api(`hub_data?hub_id=eq.${HUB_ID}&data_type=eq.${encodeURIComponent(dataType)}&select=data,updated_at&limit=1`);
-      return Array.isArray(rows) && rows.length ? rows[0] : null;
-    },
-    async writeRow(dataType, data, updatedAt) {
-      await api(`hub_data?on_conflict=hub_id,data_type`, {
-        method: "POST",
-        headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-        body: JSON.stringify({ hub_id: HUB_ID, data_type: dataType, data, updated_at: updatedAt })
-      });
-    }
-  };
-
-  // Firebase layout:
-  //   hub_stamps/<hub>/<type> = updated_at (tiny metadata, polled)
-  //   hub_data/<hub>/<type>   = { json: "<stringified data>", updated_at }
-  // The polling path is intentionally tiny. NEVER read hub_data/<hub>.json as
-  // a stamp map because that downloads every large snapshot on every poll.
-  const fbBase = () => String(cloudCfg.firebaseUrl || DEFAULT_FIREBASE_URL).replace(/\/+$/, "");
-  async function fbFetch(path, options = {}) {
+  async function r2Fetch(path, options = {}) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), FIREBASE_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), R2_TIMEOUT_MS);
     try {
-      const response = await fetch(`${fbBase()}/${path}`, { ...options, signal: controller.signal });
+      const response = await fetch(`${r2BaseUrl()}/${path}`, {
+        ...options,
+        cache: "no-store",
+        signal: controller.signal,
+        headers: { Authorization: `Bearer ${getAccessKey()}`, ...(options.headers || {}) }
+      });
       const text = await response.text();
       trackEgress(text.length);
-      if (!response.ok) throw new Error(`Firebase ${response.status}: ${text || response.statusText}`);
-      return text ? JSON.parse(text) : null;
+      if (response.status === 401 || response.status === 403) {
+        throw new Error(`Cloud access key rejected (HTTP ${response.status}): R2_ACCESS_KEY in index.html must match API_TOKEN in the Cloudflare Worker.`);
+      }
+      if (!response.ok && response.status !== 404) throw new Error(`Cloud HTTP ${response.status}: ${text.slice(0, 200)}`);
+      return { status: response.status, text, updatedAt: response.headers.get("X-Updated-At") || "" };
     } catch (error) {
-      if (error?.name === "AbortError") throw new Error(`Firebase timeout after ${FIREBASE_TIMEOUT_MS / 1000}s`);
+      if (error?.name === "AbortError") throw new Error(`Cloud timeout after ${R2_TIMEOUT_MS / 1000}s`);
+      if (error instanceof TypeError) throw new Error("Cannot reach the cloud Worker (network, wrong Worker URL, or CORS ALLOWED_ORIGINS)");
       throw error;
     } finally {
       clearTimeout(timer);
     }
   }
-  const fbRaw = {
-    async readStamps() {
-      // Tiny request: only timestamps, never the large snapshots.
-      const obj = await fbFetch(`hub_stamps/${HUB_ID}.json`);
+
+  const hubPath = code => `v1/hubs/${encodeURIComponent(code)}`;
+  const r2Raw = {
+    async readStamps(code) {
+      const r = await r2Fetch(`${hubPath(code)}/stamps`);
+      const obj = r.text ? JSON.parse(r.text) : {};
       const map = {};
       Object.keys(obj || {}).forEach(k => { map[k] = Date.parse(obj[k]) || 0; });
       return map;
     },
-    async readRow(dataType) {
-      const row = await fbFetch(`hub_data/${HUB_ID}/${encodeURIComponent(dataType)}.json`);
-      if (!row || typeof row.json !== "string") return null;
-      return { data: JSON.parse(row.json), updated_at: row.updated_at };
+    async readRow(code, dataType) {
+      const r = await r2Fetch(`${hubPath(code)}/data/${encodeURIComponent(dataType)}`);
+      if (r.status === 404 || !r.text) return null;
+      return { data: JSON.parse(r.text), updated_at: r.updatedAt };
     },
-    async writeRow(dataType, data, updatedAt) {
-      // One write updates the data row plus its tiny timestamp marker.
-      await fbFetch(`.json?print=silent`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          [`hub_data/${HUB_ID}/${encodeURIComponent(dataType)}`]: { json: JSON.stringify(data), updated_at: updatedAt },
-          [`hub_stamps/${HUB_ID}/${encodeURIComponent(dataType)}`]: updatedAt
-        })
+    async writeRow(code, dataType, data) {
+      const r = await r2Fetch(`${hubPath(code)}/data/${encodeURIComponent(dataType)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data)
       });
+      const out = r.text ? JSON.parse(r.text) : {};
+      return out.updated_at || new Date().toISOString();
     }
   };
 
-  function noteBackendError(name, error) {
-    // Kept for compatibility with the backend wrappers. Actual fallback is
-    // handled by runCloudBackend(), which retries the same operation on
-    // Supabase after ANY Firebase request failure.
-    if (name === "firebase") activateSupabaseFallback(error);
-  }
-  function wrapBackend(name, raw) {
-    const out = {};
-    ["readStamps", "readRow", "writeRow"].forEach(k => {
-      out[k] = async (...args) => {
-        try { return await raw[k](...args); } catch (e) { noteBackendError(name, e); throw e; }
-      };
-    });
-    return out;
-  }
-  const BACKENDS = { supabase: wrapBackend("supabase", sbRaw), firebase: wrapBackend("firebase", fbRaw) };
-  const backendFor = name => BACKENDS[name] || BACKENDS.supabase;
-  const activeBackend = () => backendFor(activeProvider());
-
-  async function writeRowEverywhere(dataType, data, updatedAt) {
-    // Despite the legacy function name, this is now a SINGLE-write operation.
-    // It writes to Firebase while healthy, or Supabase after Firebase failover.
-    await runCloudBackend("writeRow", dataType, data, updatedAt);
-  }
-
-  // Direct Firebase writer for uploaded operational files. This bypasses the
-  // older channel state machine so a successful file import is committed
-  // immediately even when a prior cloud poll/restore failed.
-  async function writeFilesDirectToFirebase(data, updatedAt) {
-    const encodedType = encodeURIComponent(filesChannel.dataType);
-    const payload = {
-      json: JSON.stringify(data),
-      updated_at: updatedAt
-    };
-    await fbFetch(`.json?print=silent`, {
-      method: "PATCH",
-      body: JSON.stringify({
-        [`hub_data/${HUB_ID}/${encodedType}`]: payload,
-        [`hub_stamps/${HUB_ID}/${encodedType}`]: updatedAt
-      })
-    });
-  }
-
-  // Operational uploaded files (LM / Incoming / Linehaul) are LOCAL-ONLY.
-  // SPX/FMS bridge auto-sync is the source of truth for operational uploads.
-  // Settings and rider roster continue to use the cloud sync channel.
-  async function backfillMirror() { return; }
+  const activeProvider = () => "r2";
+  // The hub code is read at call time. Callers that await before calling (push)
+  // pass their own captured code to r2Raw directly and re-check it.
+  async function runCloudBackend(method, ...args) { return r2Raw[method](HUB_CODE, ...args); }
 
   async function loadCloudConfig() {
-    // Start from the embedded Firebase-primary configuration every time.
-    // On GitHub/HTTPS, cloud-config.json can explicitly switch the provider.
-    // We intentionally do NOT persist provider config in localStorage because
-    // that caused stale file:// settings to override the current build.
-    cloudCfg = { ...EMBEDDED_CLOUD_CFG };
+    // Optional: cloud-config.json next to the page may override the Worker URL
+    //   { "workerUrl": "https://nol3-dashboard-api.<subdomain>.workers.dev" }
+    cloudCfg = {};
     try {
       if (location.protocol !== "file:") {
         const r = await fetch(`cloud-config.json?t=${Math.floor(Date.now() / 300000)}`, { cache: "no-store" });
         if (r.ok) {
           const j = await r.json();
-          if (j && typeof j === "object") {
-            cloudCfg = { ...EMBEDDED_CLOUD_CFG, ...j, mirror: false, fallbackProvider: "supabase" };
-          }
+          if (j && typeof j.workerUrl === "string") cloudCfg = { workerUrl: j.workerUrl.trim() };
         }
       }
     } catch (error) {
-      console.warn("NOL3 cloud: config fetch failed; using embedded Firebase config", error);
+      console.warn("NOL3 cloud: cloud-config.json not used", error);
     }
-    // A new Firebase-primary page should not inherit an old 6-hour failover
-    // flag from a previous broken build. Actual failures will set a fresh
-    // short failover window below.
-    try { localStorage.removeItem(FAILOVER_KEY); } catch (_) {}
+    ensureAccessKey();
     cfgLoadedAt = Date.now();
-    const now = activeProvider();
-    if (lastActive && now !== lastActive) invalidateStamps();
-    lastActive = now;
-    status(`PRIMARY • ${now.toUpperCase()}`, true);
+    if (r2Configured()) status("CONNECTING • CLOUD", true);
+    else status("LOCAL ONLY • CLOUD NOT CONFIGURED", true);
   }
   async function refreshCloudConfigIfDue() {
     if (Date.now() - cfgLoadedAt > 300000) await loadCloudConfig();
   }
-  // ===== /PROVIDER SWITCH =====
+  // ===== /CLOUDFLARE R2 BACKEND =====
 
   // ===== EGRESS GUARD =====
   // Firebase polls read only the tiny hub_stamps map; large snapshots are
@@ -13980,15 +13902,28 @@ NOL3.pages.riders = function (root) {
   }
   // ===== /PAYLOAD SLIM =====
 
+  // Cloud records are keyed by hub CODE, so no numeric "verified ID" is needed any more.
+  // (The old rule left 24 of 26 hubs local-only, and let the SPX bridge silently
+  // switch Badoc from cloud ID 3 to station ID 3061, orphaning its cloud data.)
   function isSelectedHubCloudIdVerified() {
-    try { return NOL3.getSelectedHubConfig?.()?.cloudIdVerified === true; }
-    catch (_) { return false; }
+    return !!HUB_CODE && r2Configured();
   }
 
   async function readRemoteFor(channel) {
     if (!isSelectedHubCloudIdVerified()) return null;
-    const row = await runCloudBackend("readRow", channel.dataType);
-    if (row && row.data) row.data = await unpackSnapshot(row.data);
+    const ctxCode = HUB_CODE;
+    const row = await r2Raw.readRow(ctxCode, channel.dataType);
+    // The user may have switched hubs while this request was in flight.
+    if (ctxCode !== HUB_CODE) return null;
+    if (row && row.data) {
+      row.data = await unpackSnapshot(row.data);
+      if (ctxCode !== HUB_CODE) return null;
+      const owner = row.data && row.data.hubCode ? String(row.data.hubCode) : "";
+      if (owner && owner !== String(ctxCode)) {
+        console.warn(`NOL3 cloud: ignored a record that belongs to ${owner}, active hub is ${ctxCode}`);
+        return null;
+      }
+    }
     return row;
   }
 
@@ -14011,30 +13946,17 @@ NOL3.pages.riders = function (root) {
 
   async function pushSnapshotFor(channel, snapshot) {
     if (!isSelectedHubCloudIdVerified()) {
-      throw new Error(`Cloud sync paused: ${HUB_NAME} has no verified production hub ID. Local per-hub settings are preserved.`);
+      throw new Error("Cloud sync paused: cloud is not configured (Worker URL / access key). Local per-hub settings are preserved.");
     }
-    // Firebase is the primary backend. Avoid recursively cloning/string-cleaning
-    // the full operational file snapshot on the main thread; Supabase fallback
-    // performs NUL cleanup only when it is actually needed.
-    const payload = {
-      hub_id: HUB_ID,
-      data_type: channel.dataType,
-      data: await encodeForUpload(channel, snapshot),
-      updated_at: new Date().toISOString()
-    };
-    try {
-      await writeRowEverywhere(payload.data_type, payload.data, payload.updated_at);
-    } catch (error) {
-      // Last-resort Supabase fallback with defensive cleanup.
-      if (activeProvider() === "firebase") {
-        const cleaned = stripNulCharacters(snapshot);
-        const encoded = await encodeForUpload(channel, cleaned);
-        await backendFor("supabase").writeRow(payload.data_type, encoded, payload.updated_at);
-      } else {
-        throw error;
-      }
+    if (snapshot && snapshot.hubCode && String(snapshot.hubCode) !== String(HUB_CODE)) {
+      throw new Error(`Push aborted: snapshot belongs to ${snapshot.hubCode} but the active hub is ${HUB_CODE}`);
     }
-    channel.lastStamp = Date.parse(payload.updated_at) || Date.now();
+    const ctxCode = HUB_CODE;
+    const encoded = await encodeForUpload(channel, snapshot);
+    // encodeForUpload is async; if the hub changed meanwhile, never write into the new hub's record.
+    if (ctxCode !== HUB_CODE) throw new Error("Push aborted: hub changed during upload");
+    const updatedAt = await r2Raw.writeRow(ctxCode, channel.dataType, encoded);
+    channel.lastStamp = Date.parse(updatedAt) || Date.now();
     invalidateStamps();
   }
 
@@ -14219,7 +14141,9 @@ NOL3.pages.riders = function (root) {
     const needsRemoteRead = channel === settingsChannel || channel === rosterChannel ||
       !startupStamp || startupStamp > savedRemoteTime || !savedRemoteTime;
     let remote = null;
+    const startupCtx = HUB_CODE;
     if (needsRemoteRead) remote = await readRemoteFor(channel);
+    if (startupCtx !== HUB_CODE) return false; // hub switched mid-request
 
     if (!remote || !remote.data) {
       channel.initialized = true;
@@ -14327,6 +14251,7 @@ NOL3.pages.riders = function (root) {
       if (!channel.initialized) return false;
     }
     channel.syncing = true;
+    const syncCtx = HUB_CODE;
     try {
       // Normal polling must never build/hash the large file snapshot. We only
       // need the tiny timestamp marker unless this call explicitly permits a push.
@@ -14353,6 +14278,7 @@ NOL3.pages.riders = function (root) {
       if (!stamp || stamp === channel.lastStamp) return false;
 
       const remote = await readRemoteFor(channel);
+      if (syncCtx !== HUB_CODE) return false; // hub switched mid-request: drop the result
       const remoteStamp = remote ? (Date.parse(remote.updated_at) || stamp) : stamp;
       if (remote?.data) {
         const remoteTime = Number(remote.data.clientUpdatedAt || new Date(remote.updated_at || 0).getTime() || 0);
@@ -14377,7 +14303,7 @@ NOL3.pages.riders = function (root) {
 
   async function syncSettingsAndRoster(allowPush = false) {
     if (!isSelectedHubCloudIdVerified()) {
-      status(`LOCAL ONLY • ${HUB_NAME} ID UNVERIFIED`, true);
+      status("LOCAL ONLY • CLOUD NOT CONFIGURED", true);
       return;
     }
     try {
@@ -14391,6 +14317,7 @@ NOL3.pages.riders = function (root) {
       }
     } catch (error) {
       console.error("NOL3 cloud sync failed:", error);
+      window.__NOL3_LAST_CLOUD_ERROR = String((error && error.message) || error);
       status("OFFLINE • RETRYING", false);
     }
   }
@@ -14402,7 +14329,7 @@ NOL3.pages.riders = function (root) {
   // Kept for any code elsewhere that calls window.NOL3CloudSync.syncNow().
   async function syncOnce() {
     if (!isSelectedHubCloudIdVerified()) {
-      status(`LOCAL ONLY • ${HUB_NAME} ID UNVERIFIED`, true);
+      status("LOCAL ONLY • CLOUD NOT CONFIGURED", true);
       return false;
     }
     try {
@@ -14411,6 +14338,7 @@ NOL3.pages.riders = function (root) {
       status("SAVED • CLOUD", true);
     } catch (error) {
       console.error("NOL3 manual cloud save failed:", error);
+      window.__NOL3_LAST_CLOUD_ERROR = String((error && error.message) || error);
       status("SAVE FAILED", false);
       throw error;
     }
@@ -14450,6 +14378,8 @@ NOL3.pages.riders = function (root) {
     clearUploadedFilesCloud,
     clearRosterCloud,
     usage: readEgress,
+    setAccessKey(key) { try { localStorage.setItem(R2_TOKEN_KEY, String(key || "").trim()); } catch (_) {} return r2Configured(); },
+    clearAccessKey: forgetAccessKey,
     provider: activeProvider,
     get hubId() { return HUB_ID; },
     get hubName() { return HUB_NAME; },
@@ -14498,13 +14428,15 @@ NOL3.pages.riders = function (root) {
       // read the configured Firebase records directly. This protects startup
       // recovery from any provider/timestamp/state-machine exception.
       const directFirebaseRead = async (dataType) => {
-        const url = `${DEFAULT_FIREBASE_URL}/hub_data/${HUB_ID}/${encodeURIComponent(dataType)}.json?startup=${Date.now()}`;
-        const response = await fetch(url, { cache: "no-store" });
-        if (!response.ok) throw new Error(`Firebase ${response.status}: ${response.statusText}`);
-        const row = await response.json();
-        if (!row || typeof row.json !== "string") return null;
-        let data = JSON.parse(row.json);
+        // Same Worker, but bypasses the channel state machine. It is still
+        // hub-scoped and refuses to run when cloud is not configured.
+        if (!isSelectedHubCloudIdVerified()) return null;
+        const ctxCode = HUB_CODE;
+        const row = await r2Raw.readRow(ctxCode, dataType);
+        if (!row || !row.data || ctxCode !== HUB_CODE) return null;
+        let data = row.data;
         if (data?.z === 1 && typeof data.gz === "string") data = await unpackSnapshot(data);
+        if (data?.hubCode && String(data.hubCode) !== String(ctxCode)) return null;
         return { data, updated_at: row.updated_at || "" };
       };
 
@@ -14596,7 +14528,7 @@ NOL3.pages.riders = function (root) {
     }).catch(e => {
       window.__NOL3_CLOUD_STARTUP_SYNC = false;
       console.error("NOL3 cloud configuration/startup failed", e);
-      status("FIREBASE CONFIG FAILED • RETRYING", false);
+      status("CLOUD CONFIG FAILED • RETRYING", false);
       startAdaptivePolling();
     });
   });
@@ -14912,6 +14844,231 @@ NOL3.pages.riders = function (root) {
     .fleet-overview-card-note{text-align:left}
     .fleet-overview-title{font-size:22px}
   }
+
+  /* Fleet Overview redesign: compact KPI cards, floor-only volume tables, rider fleet totals. */
+  #page-fleet-overview.fleet-overview-page{gap:14px;padding:4px 2px 24px;}
+  #page-fleet-overview .fleet-overview-head{align-items:center;padding:2px 2px 0;}
+  #page-fleet-overview .fleet-overview-title{font-size:28px;}
+  #page-fleet-overview .fleet-overview-subtitle{font-size:13px;}
+  #page-fleet-overview .fleet-overview-kpi-cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;}
+  #page-fleet-overview .fleet-overview-metric-card{min-width:0;background:#fff;border:1px solid #dce8f8;border-radius:14px;padding:16px;box-shadow:0 3px 12px rgba(37,99,235,.055);display:flex;flex-direction:column;gap:10px;}
+  #page-fleet-overview .fleet-overview-metric-top{display:flex;align-items:flex-start;gap:12px;min-width:0;}
+  #page-fleet-overview .fleet-overview-metric-icon{width:48px;height:48px;flex:0 0 48px;display:flex;align-items:center;justify-content:center;border-radius:13px;background:#e8f1ff;color:#1764e8;font-size:25px;font-weight:900;}
+  #page-fleet-overview .fleet-overview-metric-card.productivity .fleet-overview-metric-icon{background:#e8f1ff;color:#1764e8;}
+  #page-fleet-overview .fleet-overview-metric-card.usage .fleet-overview-metric-icon{background:#fff0dc;color:#c76c00;}
+  #page-fleet-overview .fleet-overview-metric-card.sr .fleet-overview-metric-icon{background:#ddf8e9;color:#159453;}
+  #page-fleet-overview .fleet-overview-metric-copy{min-width:0;flex:1;}
+  #page-fleet-overview .fleet-overview-metric-title{font-size:15px;line-height:1.25;font-weight:850;color:#0f1e3d;}
+  #page-fleet-overview .fleet-overview-metric-subtitle{font-size:11px;color:#647da2;margin-top:4px;}
+  #page-fleet-overview .fleet-overview-metric-number{font-size:30px;line-height:1.1;letter-spacing:-.035em;font-weight:900;color:#0b1734;margin-top:7px;font-variant-numeric:tabular-nums;}
+  #page-fleet-overview .fleet-overview-metric-number-row{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;}
+  #page-fleet-overview .fleet-overview-target{flex:0 0 auto;max-width:115px;background:#fff7d9;border:1px solid #f4d873;border-radius:9px;padding:7px 8px;text-align:center;}
+  #page-fleet-overview .fleet-overview-target-label{font-size:9px;line-height:1.25;text-transform:uppercase;color:#a16207;font-weight:800;}
+  #page-fleet-overview .fleet-overview-target .fleet-overview-kpi-editor{margin-top:4px;width:78px;font-size:14px;padding:3px 4px;background:#fffdf4;}
+  #page-fleet-overview .fleet-overview-target .fleet-overview-kpi-editor-wrap{margin-top:4px;gap:2px;}
+  #page-fleet-overview .fleet-overview-target .fleet-overview-kpi-editor-wrap .fleet-overview-kpi-editor{width:67px;margin-top:0;}
+  #page-fleet-overview .fleet-overview-progress-row{display:flex;align-items:center;gap:8px;margin-top:1px;}
+  #page-fleet-overview .fleet-overview-progress{height:10px;background:#e2e8f0;border-radius:999px;overflow:hidden;flex:1;}
+  #page-fleet-overview .fleet-overview-progress-fill{height:100%;border-radius:999px;background:linear-gradient(90deg,#2784f6,#4da3ff);}
+  #page-fleet-overview .fleet-overview-progress-fill.green{background:linear-gradient(90deg,#16b86b,#43cd86);}
+  #page-fleet-overview .fleet-overview-progress-text{font-size:11px;font-weight:850;color:#253d65;min-width:30px;text-align:right;}
+  #page-fleet-overview .fleet-overview-metric-foot{font-size:11px;line-height:1.35;color:#58749e;display:flex;align-items:center;gap:6px;min-height:16px;}
+  #page-fleet-overview .fleet-overview-status-good{display:inline-flex;align-items:center;gap:5px;padding:4px 8px;border-radius:7px;background:#e1f8eb;color:#0d9652;font-weight:800;font-size:11px;}
+  #page-fleet-overview .fleet-overview-middle-grid{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(360px,1fr);gap:12px;align-items:stretch;}
+  #page-fleet-overview .fleet-overview-card{min-width:0;border-color:#dce8f8;box-shadow:0 3px 12px rgba(37,99,235,.05);}
+  #page-fleet-overview .fleet-overview-card-head{padding:12px 14px;align-items:center;flex-direction:row;}
+  #page-fleet-overview .fleet-overview-card-title{font-size:15px;}
+  #page-fleet-overview .fleet-overview-card-note{font-size:11px;}
+  #page-fleet-overview .fleet-overview-section-title-wrap{display:flex;align-items:center;gap:10px;min-width:0;}
+  #page-fleet-overview .fleet-overview-section-icon{width:38px;height:38px;display:flex;align-items:center;justify-content:center;background:#e8f1ff;border-radius:11px;color:#1764e8;font-size:22px;font-weight:900;flex:0 0 38px;}
+  #page-fleet-overview .fleet-overview-section-subtitle{font-size:11px;color:#647da2;margin-top:3px;}
+  #page-fleet-overview .fleet-overview-table{min-width:0;width:100%;font-size:12px;}
+  #page-fleet-overview .fleet-overview-table th,#page-fleet-overview .fleet-overview-table td{padding:9px 10px;}
+  #page-fleet-overview .fleet-overview-modern-table td:nth-child(2){font-weight:600;color:#334155;}
+  #page-fleet-overview .fleet-overview-modern-table td:nth-child(5){font-weight:500;color:#1e293b;}
+  #page-fleet-overview .fleet-overview-modern-table td:last-child{font-weight:800;color:#0f172a;}
+  #page-fleet-overview .fleet-overview-volume-value{color:#1264ee;font-weight:850!important;}
+  #page-fleet-overview .fleet-overview-share{display:flex;align-items:center;gap:7px;min-width:100px;}
+  #page-fleet-overview .fleet-overview-share-bar{height:9px;flex:1;min-width:28px;border-radius:99px;background:#e2e8f0;overflow:hidden;}
+  #page-fleet-overview .fleet-overview-share-fill{height:100%;border-radius:99px;background:linear-gradient(90deg,#318bfb,#59a9ff);}
+  #page-fleet-overview .fleet-overview-share-label{min-width:38px;text-align:right;font-size:11px;font-variant-numeric:tabular-nums;}
+  #page-fleet-overview .fleet-overview-riders-wrap{min-width:0;}
+  #page-fleet-overview .fleet-overview-rider-toolbar{padding:12px 14px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;border-bottom:1px solid #edf1f5;}
+  #page-fleet-overview .fleet-overview-rider-summaries{display:flex;align-items:center;gap:7px;flex-wrap:wrap;}
+  #page-fleet-overview .fleet-overview-rider-summary{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:9px;background:#f0f6ff;border:1px solid #e0ebff;min-width:82px;}
+  #page-fleet-overview .fleet-overview-rider-summary .summary-icon{font-size:16px;color:#1764e8;font-weight:900;}
+  #page-fleet-overview .fleet-overview-rider-summary .summary-copy{display:flex;flex-direction:column;gap:1px;}
+  #page-fleet-overview .fleet-overview-rider-summary .summary-label{font-size:9px;font-weight:800;color:#547199;line-height:1.1;}
+  #page-fleet-overview .fleet-overview-rider-summary .summary-value{font-size:15px;line-height:1.1;font-weight:900;color:#0f1e3d;font-variant-numeric:tabular-nums;}
+  #page-fleet-overview .fleet-overview-rider-summary.type-3w{background:#eafaf0;border-color:#d6f5e2;}
+  #page-fleet-overview .fleet-overview-rider-summary.type-3w .summary-icon,#page-fleet-overview .fleet-overview-rider-summary.type-3w .summary-value{color:#159453;}
+  #page-fleet-overview .fleet-overview-rider-summary.type-4w{background:#fff4e4;border-color:#ffebca;}
+  #page-fleet-overview .fleet-overview-rider-summary.type-4w .summary-icon,#page-fleet-overview .fleet-overview-rider-summary.type-4w .summary-value{color:#c76c00;}
+  #page-fleet-overview .fleet-overview-rider-summary.type-flexi{background:#f4edff;border-color:#e8ddff;}
+  #page-fleet-overview .fleet-overview-rider-summary.type-flexi .summary-icon,#page-fleet-overview .fleet-overview-rider-summary.type-flexi .summary-value{color:#7c3aed;}
+  #page-fleet-overview .fleet-overview-rider-controls{display:flex;align-items:center;gap:7px;flex:1;justify-content:flex-end;min-width:min(100%,320px);}
+  #page-fleet-overview .fleet-overview-search{width:min(290px,100%);min-width:160px;border:1px solid #d6e3f6;border-radius:9px;padding:9px 10px;font:inherit;font-size:11px;color:#1e293b;background:#fff;outline:none;}
+  #page-fleet-overview .fleet-overview-search:focus,#page-fleet-overview .fleet-overview-filter:focus{border-color:#82b5ff;box-shadow:0 0 0 3px rgba(59,130,246,.10);}
+  #page-fleet-overview .fleet-overview-filter{border:1px solid #d6e3f6;border-radius:9px;padding:9px 10px;font:inherit;font-size:11px;background:#fff;color:#334155;max-width:142px;}
+  #page-fleet-overview .fleet-overview-today-chip{white-space:nowrap;padding:8px 10px;border-radius:9px;background:#edf5ff;color:#1264ee;border:1px solid #dbeafe;font-size:11px;font-weight:800;}
+  #page-fleet-overview .fleet-overview-rider-table{min-width:760px;}
+  #page-fleet-overview .fleet-overview-fleet-badge{display:inline-flex;align-items:center;justify-content:center;min-width:44px;border-radius:6px;padding:3px 7px;background:#e7f0ff;color:#1764e8;font-weight:850;font-size:11px;}
+  #page-fleet-overview .fleet-overview-fleet-badge.type-3w{background:#e3f8eb;color:#159453;}
+  #page-fleet-overview .fleet-overview-fleet-badge.type-4w{background:#fff0dc;color:#bf6900;}
+  #page-fleet-overview .fleet-overview-fleet-badge.type-flexi{background:#f1eaff;color:#7c3aed;}
+  #page-fleet-overview .fleet-overview-table tr.fleet-overview-total td{background:#eff6ff;border-top:1px solid #cfe0f8;font-weight:900;color:#0f1e3d;}
+  #page-fleet-overview .fleet-overview-footer-note{padding:10px 14px;color:#58749e;font-size:11px;}
+  @media(max-width:1120px){
+    #page-fleet-overview .fleet-overview-kpi-cards{grid-template-columns:repeat(2,minmax(0,1fr));}
+    #page-fleet-overview .fleet-overview-middle-grid{grid-template-columns:1fr;}
+  }
+  @media(max-width:680px){
+    #page-fleet-overview.fleet-overview-page{gap:12px;padding:2px 0 18px;}
+    #page-fleet-overview .fleet-overview-title{font-size:23px;}
+    #page-fleet-overview .fleet-overview-head{align-items:flex-start;}
+    #page-fleet-overview .fleet-overview-kpi-cards{grid-template-columns:1fr;}
+    #page-fleet-overview .fleet-overview-metric-card{padding:13px;}
+    #page-fleet-overview .fleet-overview-middle-grid{grid-template-columns:minmax(0,1fr);}
+    #page-fleet-overview .fleet-overview-card-head{align-items:flex-start;flex-direction:row;}
+    #page-fleet-overview .fleet-overview-card-note{text-align:right;}
+    #page-fleet-overview .fleet-overview-rider-toolbar{align-items:stretch;}
+    #page-fleet-overview .fleet-overview-rider-controls{justify-content:flex-start;min-width:0;flex-wrap:wrap;}
+    #page-fleet-overview .fleet-overview-search{width:100%;flex:1 1 100%;}
+    #page-fleet-overview .fleet-overview-filter{flex:1;max-width:none;}
+  }
+
+  /* Keep fleet-type summary cards beside the deployed-rider heading. */
+  #page-fleet-overview .fleet-overview-rider-head{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;}
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-section-title-wrap{flex:0 0 auto;}
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summaries{flex:1 1 500px;justify-content:flex-end;min-width:0;}
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary{padding:6px 8px;min-width:72px;}
+  #page-fleet-overview .fleet-overview-rider-toolbar{justify-content:flex-end;padding-top:8px;padding-bottom:8px;}
+  @media (max-width:1100px){
+    #page-fleet-overview .fleet-overview-rider-head{align-items:flex-start;}
+    #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summaries{flex-basis:100%;justify-content:flex-start;}
+  }
+  @media (max-width:600px){
+    #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summaries{gap:5px;}
+    #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary{flex:1 1 calc(33.333% - 5px);min-width:0;}
+    #page-fleet-overview .fleet-overview-rider-toolbar{padding-left:10px;padding-right:10px;}
+  }
+
+  /* Improve visibility of the deployed-rider summary cards. */
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summaries{gap:9px;flex:1 1 560px;}
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary{
+    min-width:98px;padding:10px 12px;gap:9px;border-width:1.5px;border-radius:12px;
+    box-shadow:0 3px 10px rgba(15,45,90,.08);min-height:54px;
+  }
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary:first-child{
+    min-width:112px;background:linear-gradient(135deg,#dbeafe,#eff6ff);border-color:#7fb0ff;border-top:3px solid #1764e8;
+  }
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary:nth-child(2){
+    background:linear-gradient(135deg,#e4efff,#f5f9ff);border-color:#a9c9ff;border-top:3px solid #2563eb;
+  }
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary.type-3w{background:linear-gradient(135deg,#dcfce7,#f0fdf4);border-color:#9ce6b6;border-top:3px solid #16a34a;}
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary.type-4w{background:linear-gradient(135deg,#ffedd5,#fff7ed);border-color:#fdc98a;border-top:3px solid #ea580c;}
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary.type-flexi{background:linear-gradient(135deg,#ede9fe,#faf5ff);border-color:#c4b5fd;border-top:3px solid #7c3aed;}
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary .summary-icon{font-size:20px;line-height:1;}
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary .summary-label{font-size:10px;letter-spacing:.035em;color:#385577;line-height:1.2;}
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary .summary-value{font-size:20px;line-height:1.05;font-weight:950;}
+  @media (max-width:1100px){
+    #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summaries{flex-basis:100%;justify-content:flex-start;}
+  }
+  @media (max-width:600px){
+    #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summaries{gap:7px;}
+    #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary{flex:1 1 calc(50% - 7px);min-width:0;padding:9px 10px;}
+    #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary .summary-value{font-size:19px;}
+  }
+
+
+
+  /* Keep rider title, fleet totals, search, and filter together on the right in one desktop row. */
+  #page-fleet-overview .fleet-overview-rider-head{
+    display:flex;align-items:center;justify-content:space-between;flex-wrap:nowrap;gap:12px;
+    padding:12px 14px;border-bottom:1px solid #edf1f5;
+  }
+  #page-fleet-overview .fleet-overview-rider-head>.fleet-overview-section-title-wrap{flex:0 0 auto;max-width:245px;}
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summaries{flex:0 0 auto;display:flex;align-items:center;justify-content:flex-end;gap:6px;min-width:0;flex-wrap:nowrap;}
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary{min-width:76px;padding:7px 8px;gap:6px;}
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary:first-child{min-width:92px;}
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary .summary-icon{font-size:17px;}
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary .summary-value{font-size:18px;}
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-controls{flex:1 1 365px;min-width:300px;display:flex;align-items:center;justify-content:flex-end;gap:7px;}
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-search{width:auto;flex:1 1 225px;min-width:150px;}
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-filter{flex:0 0 135px;width:135px;}
+  #page-fleet-overview .fleet-overview-rider-toolbar{display:none;}
+  @media(max-width:1250px){
+    #page-fleet-overview .fleet-overview-rider-head{flex-wrap:wrap;}
+    #page-fleet-overview .fleet-overview-rider-head>.fleet-overview-section-title-wrap{max-width:none;}
+    #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summaries{flex:1 1 auto;}
+    #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-controls{flex:1 1 100%;min-width:0;}
+    #page-fleet-overview .fleet-overview-rider-head .fleet-overview-search{max-width:none;}
+  }
+  @media(max-width:600px){
+    #page-fleet-overview .fleet-overview-rider-head{align-items:stretch;}
+    #page-fleet-overview .fleet-overview-rider-head>.fleet-overview-section-title-wrap{flex-basis:100%;}
+    #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summaries{flex:1 1 100%;flex-wrap:wrap;justify-content:flex-start;}
+    #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary{flex:1 1 calc(33.333% - 7px);min-width:0;}
+    #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-controls{flex-wrap:wrap;}
+    #page-fleet-overview .fleet-overview-rider-head .fleet-overview-search{flex:1 1 100%;width:100%;}
+    #page-fleet-overview .fleet-overview-rider-head .fleet-overview-filter{flex:1 1 100%;width:100%;}
+  }
+
+
+  /* Compact the four top Fleet Overview KPI cards without changing their data or calculations. */
+  #page-fleet-overview .fleet-overview-kpi-cards{gap:10px;align-items:stretch;}
+  #page-fleet-overview .fleet-overview-metric-card{
+    padding:11px 12px;
+    gap:7px;
+    min-height:0;
+    border-radius:12px;
+  }
+  #page-fleet-overview .fleet-overview-metric-top{gap:8px;}
+  #page-fleet-overview .fleet-overview-metric-icon{
+    width:40px;height:40px;flex-basis:40px;border-radius:10px;font-size:21px;
+  }
+  #page-fleet-overview .fleet-overview-metric-title{font-size:14px;line-height:1.2;}
+  #page-fleet-overview .fleet-overview-metric-subtitle{font-size:10px;line-height:1.2;margin-top:2px;}
+  #page-fleet-overview .fleet-overview-metric-number{font-size:26px;line-height:1.05;margin-top:4px;}
+  #page-fleet-overview .fleet-overview-metric-number-row{gap:6px;align-items:flex-start;}
+  #page-fleet-overview .fleet-overview-target{padding:5px 6px;border-radius:8px;max-width:104px;}
+  #page-fleet-overview .fleet-overview-target-label{font-size:8px;line-height:1.15;}
+  #page-fleet-overview .fleet-overview-target .fleet-overview-kpi-editor{width:64px;font-size:12px;padding:2px 3px;margin-top:3px;}
+  #page-fleet-overview .fleet-overview-target .fleet-overview-kpi-editor-wrap{margin-top:3px;gap:2px;}
+  #page-fleet-overview .fleet-overview-target .fleet-overview-kpi-editor-wrap .fleet-overview-kpi-editor{width:57px;margin-top:0;}
+  #page-fleet-overview .fleet-overview-progress-row{gap:6px;}
+  #page-fleet-overview .fleet-overview-progress{height:8px;}
+  #page-fleet-overview .fleet-overview-progress-text{font-size:10px;min-width:27px;}
+  #page-fleet-overview .fleet-overview-metric-foot{font-size:10px;line-height:1.2;gap:4px;min-height:13px;}
+  #page-fleet-overview .fleet-overview-status-good{padding:3px 6px;font-size:10px;}
+  @media(max-width:680px){
+    #page-fleet-overview .fleet-overview-metric-card{padding:10px;gap:6px;}
+    #page-fleet-overview .fleet-overview-metric-number{font-size:25px;}
+  }
+
+
+  /* Reduce only the summary cards beside List of Deployed Riders. */
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summaries{gap:4px;}
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary{
+    min-width:58px;
+    min-height:40px;
+    padding:4px 6px;
+    gap:4px;
+    border-width:1px;
+    border-radius:8px;
+    box-shadow:0 1px 3px rgba(15,45,90,.05);
+  }
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary:first-child{min-width:76px;}
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary .summary-icon{font-size:13px;line-height:1;}
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary .summary-copy{gap:1px;min-width:0;}
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary .summary-label{font-size:8px;letter-spacing:.01em;line-height:1.05;white-space:nowrap;}
+  #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary .summary-value{font-size:15px;line-height:1.05;font-weight:900;}
+  @media(max-width:600px){
+    #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summaries{gap:5px;}
+    #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary{min-height:38px;padding:4px 6px;}
+    #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary .summary-value{font-size:15px;}
+  }
+
 </style>
 
 <script id="fleet-overview-module">
@@ -15110,8 +15267,11 @@ NOL3.pages.riders = function (root) {
   }
 
   function render(root){
-    const rows=clusterRows(); const sim=loadSim(); const riders=activeRiders();
-    const total=rows.reduce((s,r)=>s+r.total,0);
+    const rows=clusterRows();
+    const sim=loadSim();
+    const riders=activeRiders();
+    // Fleet Overview is a live daily planning snapshot: volume shown here is the on-floor count only.
+    const total=rows.reduce((sum,row)=>sum+num(row.onFloor),0);
     const actual=rows.reduce((a,r)=>({two:a.two+r.actual.two,three:a.three+r.actual.three,four:a.four+r.actual.four,flexi:a.flexi+r.actual.flexi,total:a.total+r.actual.total}),{two:0,three:0,four:0,flexi:0,total:0});
     const defaults={}; rows.forEach(r=>{defaults[r.cluster]={two:r.actual.two,three:r.actual.three,four:r.actual.four,flexi:r.actual.flexi,flexiQty:0};});
     const current={...defaults,...sim};
@@ -15131,6 +15291,7 @@ NOL3.pages.riders = function (root) {
     const fourTarget=Math.max(0,saved4Usage);
     const sim4Usage=simTotal>0?sim4/simTotal:0; const actual4Usage=actual.total>0?actual.four/actual.total:0;
     const inv=(x,t)=>t>0?Math.max(0,Math.min(100,(1-x/t)*100)):100;
+
     // Assign OID = current-hub LM parcels with status Delivering, Delivered, or OnHold.
     // Current SR is Delivered / Assign OID. Simulated Number excludes assigned Flexi riders.
     const lmForSR=(typeof NOL3.getPlanningLMInventoryV10 === 'function' ? NOL3.getPlanningLMInventoryV10() : NOL3.lmInventory);
@@ -15153,42 +15314,130 @@ NOL3.pages.riders = function (root) {
     const savedSRTarget=Number(sim.kpiCurrentSRTargetPct);
     const currentSRTargetPct=Number.isFinite(savedSRTarget)&&savedSRTarget>=0?savedSRTarget:86.78;
     const currentSRAchievement=currentSRTargetPct>0?currentSR/currentSRTargetPct*100:0;
+    const fpAchievement=(Number(fpTarget)||0)>0?Math.max(0,Math.min(100,(actualFP/Number(fpTarget))*100)):0;
+    const fourAchievement=inv(actual4Usage,fourTarget);
+    const srAchievement=Math.max(0,Math.min(100,currentSRAchievement));
+
+    // Build one unique rider list for the summary cards, interactive table, and total row.
+    const rmap=riderLookup();
+    const deployedById=new Map();
+    rows.forEach(r=>r.riderDetails.forEach(d=>{
+      const id=norm(d.id); if(!id)return;
+      const rd=rmap.get(id)||rmap.get(norm(d.id));
+      let item=deployedById.get(id);
+      if(!item){
+        item={id,name:rd?.name||d.id,vehicleType:rd?.vehicleType||'',onFloor:0,clusters:[],bucket:vehicleBucket(rd?.vehicleType||'')};
+        deployedById.set(id,item);
+      }
+      item.onFloor+=num(d.onFloor);
+      const clusterLabel=`${r.cluster} · ${r.name}`;
+      if(!item.clusters.includes(clusterLabel))item.clusters.push(clusterLabel);
+      if(!item.vehicleType&&rd?.vehicleType)item.vehicleType=rd.vehicleType;
+      item.bucket=vehicleBucket(item.vehicleType);
+    }));
+    const deployedRiders=[...deployedById.values()].sort((a,b)=>a.name.localeCompare(b.name));
+    const riderTotals=deployedRiders.reduce((a,r)=>{if(r.bucket==='2w')a.two++;else if(r.bucket==='3w')a.three++;else if(r.bucket==='4w')a.four++;else if(r.bucket==='flexi')a.flexi++;a.total++;a.parcels+=num(r.onFloor);return a;},{two:0,three:0,four:0,flexi:0,total:0,parcels:0});
+
+    // Top-town ranking uses the same on-floor parcel source and current planning-area groups.
+    const floorTownCounts=townCounts();
+    const topTownMap=new Map();
+    (Array.isArray(NOL3.deliveryAreas)?NOL3.deliveryAreas:[]).forEach(area=>{
+      (Array.isArray(area?.groups)?area.groups:[]).forEach(group=>{
+        (Array.isArray(group?.towns)?group.towns:[]).forEach(key=>{
+          const part=splitTownKey(key); if(!part.town)return;
+          const qty=num(floorTownCounts.get(part.town));
+          topTownMap.set(part.town,(topTownMap.get(part.town)||0)+qty);
+        });
+      });
+    });
+    const topTowns=[...topTownMap.entries()].map(([name,volume])=>({name,volume})).sort((a,b)=>b.volume-a.volume||a.name.localeCompare(b.name)).slice(0,5);
     const allRows=[...rows];
+    const clusterVolume=rows.reduce((sum,r)=>sum+num(r.onFloor),0);
+
     root.innerHTML=`
       <div class="page active fleet-overview-page" id="page-fleet-overview">
-        <div class="fleet-overview-head">
-          <div><h2 class="fleet-overview-title">Fleet Overview</h2><div class="fleet-overview-subtitle">${esc(HUB_KEY()||'No hub selected')} · live planning snapshot</div></div>
-          <div class="fleet-overview-actions"><span class="fleet-overview-chip">${total.toLocaleString()} volume</span></div>
+        <div class="fleet-overview-kpi-cards">
+          <article class="fleet-overview-metric-card volume">
+            <div class="fleet-overview-metric-top"><div class="fleet-overview-metric-icon" aria-hidden="true">▣</div><div class="fleet-overview-metric-copy"><div class="fleet-overview-metric-title">Total Volume</div><div class="fleet-overview-metric-number">${total.toLocaleString()}</div></div></div>
+          </article>
+          <article class="fleet-overview-metric-card productivity">
+            <div class="fleet-overview-metric-top"><div class="fleet-overview-metric-icon" aria-hidden="true">▥</div><div class="fleet-overview-metric-copy"><div class="fleet-overview-metric-title">Allmile Productivity</div><div class="fleet-overview-metric-number-row"><div class="fleet-overview-metric-number">${actualFP.toFixed(2)}</div><div class="fleet-overview-target"><div class="fleet-overview-target-label">Target to achieve A+</div><input class="fleet-overview-kpi-editor" id="fleetOverviewFPTarget" type="number" min="1" step="0.01" value="${fpTarget}" aria-label="Allmile Productivity target"></div></div></div></div>
+            <div class="fleet-overview-progress-row"><div class="fleet-overview-progress"><div class="fleet-overview-progress-fill" style="width:${fpAchievement}%"></div></div><span class="fleet-overview-progress-text">${fpAchievement.toFixed(0)}%</span></div>
+            <div class="fleet-overview-metric-foot">♟ ${actual.total.toLocaleString()} deployed / ${riders.length.toLocaleString()} active</div>
+          </article>
+          <article class="fleet-overview-metric-card usage">
+            <div class="fleet-overview-metric-top"><div class="fleet-overview-metric-icon" aria-hidden="true">▰</div><div class="fleet-overview-metric-copy"><div class="fleet-overview-metric-title">4WH Usage</div><div class="fleet-overview-metric-number-row"><div class="fleet-overview-metric-number">${actual4Usage.toFixed(2)}</div><div class="fleet-overview-target"><div class="fleet-overview-target-label">Target to achieve A+</div><input class="fleet-overview-kpi-editor" id="fleetOverview4WHTarget" type="number" min="0" step="0.01" value="${fourTarget.toFixed(2)}" aria-label="4WH Usage target"></div></div></div></div>
+            <div class="fleet-overview-progress-row"><div class="fleet-overview-progress"><div class="fleet-overview-progress-fill green" style="width:${fourAchievement}%"></div></div><span class="fleet-overview-progress-text">${fourAchievement.toFixed(0)}%</span></div>
+            <div class="fleet-overview-metric-foot">◔ Actual 4WH ratio</div>
+          </article>
+          <article class="fleet-overview-metric-card sr">
+            <div class="fleet-overview-metric-top"><div class="fleet-overview-metric-icon" aria-hidden="true">◉</div><div class="fleet-overview-metric-copy"><div class="fleet-overview-metric-title">Current SR</div><div class="fleet-overview-metric-number-row"><div class="fleet-overview-metric-number">${currentSR.toFixed(2)}%</div><div class="fleet-overview-target"><div class="fleet-overview-target-label">Target to achieve A+</div><span class="fleet-overview-kpi-editor-wrap"><input class="fleet-overview-kpi-editor" id="fleetOverviewSRTarget" type="number" min="0" max="100" step="0.01" value="${currentSRTargetPct}" aria-label="Current SR target"><span>%</span></span></div></div></div></div>
+            <div class="fleet-overview-progress-row"><div class="fleet-overview-progress"><div class="fleet-overview-progress-fill green" style="width:${srAchievement}%"></div></div><span class="fleet-overview-progress-text">${srAchievement.toFixed(0)}%</span></div>
+            <div class="fleet-overview-metric-foot">${currentSR>=currentSRTargetPct&&currentSRTargetPct>0?'<span class="fleet-overview-status-good">↗ Above target</span>':''} ${assignedOID.toLocaleString()} assigned OID / ${deployedNonFlexi.toLocaleString()} deployed non-Flexi riders</div>
+          </article>
         </div>
 
-        <section class="fleet-overview-card">
-          <div class="fleet-overview-card-head"><div class="fleet-overview-card-title">KPI</div><div class="fleet-overview-card-note">Targets and actual deployed-driver indicators</div></div>
-          <div class="fleet-overview-kpi-grid">
-            <div></div><div class="fleet-overview-kpi-head">Target To Achieve A+</div><div class="fleet-overview-kpi-head">Simulated Number</div><div class="fleet-overview-kpi-head">Achievement Rate</div><div></div>
-          </div>
-          <div class="fleet-overview-kpi-body">
-            <div class="fleet-overview-kpi-row"><div class="fleet-overview-kpi-label">Allmile Productivity</div><div class="fleet-overview-kpi-col"><input class="fleet-overview-kpi-editor" id="fleetOverviewFPTarget" type="number" min="1" step="0.01" value="${fpTarget}"></div><div class="fleet-overview-kpi-col fleet-overview-kpi-value">${actualFP.toFixed(2)}</div><div class="fleet-overview-kpi-col fleet-overview-rate">${((Number(fpTarget)||0)>0?(actualFP/Number(fpTarget))*100:0).toFixed(2)}%</div><div class="fleet-overview-kpi-col fleet-overview-muted">${actual.total.toLocaleString()} deployed / ${riders.length.toLocaleString()} active</div></div>
-            <div class="fleet-overview-kpi-row"><div class="fleet-overview-kpi-label">4WH Usage</div><div class="fleet-overview-kpi-col"><input class="fleet-overview-kpi-editor" id="fleetOverview4WHTarget" type="number" min="0" step="0.01" value="${fourTarget.toFixed(2)}"></div><div class="fleet-overview-kpi-col fleet-overview-kpi-value">${actual4Usage.toFixed(2)}</div><div class="fleet-overview-kpi-col fleet-overview-rate">${inv(actual4Usage,fourTarget).toFixed(0)}%</div><div class="fleet-overview-kpi-col fleet-overview-muted">Actual 4WH ratio</div></div>
-            <div class="fleet-overview-kpi-row"><div class="fleet-overview-kpi-label">Current SR</div><div class="fleet-overview-kpi-col"><span class="fleet-overview-kpi-editor-wrap"><input class="fleet-overview-kpi-editor" id="fleetOverviewSRTarget" type="number" min="0" max="100" step="0.01" value="${currentSRTargetPct}"><span>%</span></span></div><div class="fleet-overview-kpi-col fleet-overview-kpi-value"></div><div class="fleet-overview-kpi-col fleet-overview-rate"></div><div class="fleet-overview-kpi-col fleet-overview-muted">${assignedOID.toLocaleString()} assigned OID / ${deployedNonFlexi.toLocaleString()} deployed non-Flexi riders · SR ${currentSR.toFixed(2)}%</div></div>
-          </div>
-          </div>
-        </section>
+        <div class="fleet-overview-middle-grid">
+          <section class="fleet-overview-card">
+            <div class="fleet-overview-card-head"><div class="fleet-overview-section-title-wrap"><div class="fleet-overview-section-icon" aria-hidden="true">▱</div><div><div class="fleet-overview-card-title">Volume Per Cluster</div></div></div></div>
+            <div class="fleet-overview-table-wrap"><table class="fleet-overview-table fleet-overview-modern-table"><thead><tr><th class="left">Cluster</th><th class="left">Name</th><th>Volume</th><th>2WH</th><th>3WH</th><th>4WH</th><th>Flexi</th><th>Total Riders</th></tr></thead><tbody>
+            ${allRows.map(r=>`<tr><td class="left">${esc(r.cluster)}</td><td class="left">${esc(r.name)}</td><td class="num fleet-overview-volume-value">${num(r.onFloor).toLocaleString()}</td><td class="num">${r.actual.two||0}</td><td class="num">${r.actual.three||0}</td><td class="num">${r.actual.four||0}</td><td class="num">${r.actual.flexi||0}</td><td class="num">${r.actual.total||0}</td></tr>`).join('')}
+            <tr class="fleet-overview-total"><td colspan="2" class="left">TOTAL</td><td class="num fleet-overview-volume-value">${clusterVolume.toLocaleString()}</td><td class="num">${actual.two||0}</td><td class="num">${actual.three||0}</td><td class="num">${actual.four||0}</td><td class="num">${actual.flexi||0}</td><td class="num">${actual.total||0}</td></tr>
+            </tbody></table></div>
+          </section>
 
-        <section class="fleet-overview-card">
-          <div class="fleet-overview-card-head"><div class="fleet-overview-card-title">Volume Per Cluster</div><div class="fleet-overview-card-note">On floor + in transit, grouped from current planning areas</div></div>
-          <div class="fleet-overview-table-wrap"><table class="fleet-overview-table"><thead><tr><th class="left">Cluster</th><th class="left">Name</th><th>Volume On Floor</th><th>Volume In Transit</th><th>Total Volume</th><th>2W</th><th>3W</th><th>4W</th><th>Flexi</th><th>Total</th></tr></thead><tbody>
-          ${allRows.map(r=>`<tr><td class="left">${r.cluster}</td><td class="left">${esc(r.name)}</td><td class="num">${r.onFloor.toLocaleString()}</td><td class="num fleet-overview-in-transit">${r.inTransit.toLocaleString()}</td><td class="num"><b>${r.total.toLocaleString()}</b></td><td class="num">${r.actual.two||''}</td><td class="num">${r.actual.three||''}</td><td class="num">${r.actual.four||''}</td><td class="num">${r.actual.flexi||''}</td><td class="num"><b>${r.actual.total||0}</b></td></tr>`).join('')}
-          <tr class="fleet-overview-total"><td colspan="2" class="left">TOTAL</td><td class="num">${rows.reduce((s,r)=>s+r.onFloor,0).toLocaleString()}</td><td class="num fleet-overview-in-transit">${rows.reduce((s,r)=>s+r.inTransit,0).toLocaleString()}</td><td class="num">${total.toLocaleString()}</td><td class="num">${actual.two||0}</td><td class="num">${actual.three||0}</td><td class="num">${actual.four||0}</td><td class="num">${actual.flexi||0}</td><td class="num">${actual.total||0}</td></tr>
-          </tbody></table></div>
-        </section>
+          <section class="fleet-overview-card">
+            <div class="fleet-overview-card-head"><div class="fleet-overview-section-title-wrap"><div class="fleet-overview-section-icon" aria-hidden="true">⌖</div><div><div class="fleet-overview-card-title">Top 5 Towns by Volume</div></div></div></div>
+            <div class="fleet-overview-table-wrap"><table class="fleet-overview-table fleet-overview-modern-table"><thead><tr><th>#</th><th class="left">Town</th><th>Volume</th><th class="left">% of Total</th></tr></thead><tbody>
+            ${topTowns.length?topTowns.map((town,i)=>{const pct=total>0?town.volume/total*100:0;return `<tr><td class="num">${i+1}</td><td class="left">${esc(town.name)}</td><td class="num fleet-overview-volume-value">${town.volume.toLocaleString()}</td><td><div class="fleet-overview-share"><div class="fleet-overview-share-bar"><div class="fleet-overview-share-fill" style="width:${Math.max(0,Math.min(100,pct))}%"></div></div><span class="fleet-overview-share-label">${pct.toFixed(1)}%</span></div></td></tr>`;}).join(''):`<tr><td colspan="4" class="fleet-overview-empty">No town volumes available in the current planning groups.</td></tr>`}
+            </tbody></table></div>
+          </section>
+        </div>
 
-        <section class="fleet-overview-card">
-          <div class="fleet-overview-card-head"><div class="fleet-overview-card-title">List of Deployed Riders</div><div class="fleet-overview-card-note">Parcel volume is distributed evenly among riders assigned to each Town Group</div></div>
-          <div class="fleet-overview-table-wrap"><table class="fleet-overview-table"><thead><tr><th class="left">Rider</th><th class="left">Fleet Type</th><th class="left">Cluster</th><th class="num">Parcels on Floor</th><th class="num">In Transit</th></tr></thead><tbody>
-          ${(()=>{const rmap=riderLookup(); const seen=new Set(); const body=[]; rows.forEach(r=>r.riderDetails.forEach(d=>{const id=norm(d.id);if(seen.has(id))return;seen.add(id);const rd=rmap.get(id);body.push(`<tr><td class="left">${esc(rd?.name||d.id)}</td><td class="left">${esc(rd?.vehicleType||'')}</td><td class="left">${r.cluster} · ${esc(r.name)}</td><td class="num">${Number(d.onFloor||0).toLocaleString()}</td><td class="num fleet-overview-in-transit">${Number(d.inTransit||0).toLocaleString()}</td></tr>`);})); return body.length?body.join(''):`<tr><td colspan="5" class="fleet-overview-empty">No riders are assigned to planning groups yet.</td></tr>`;})()}
-          </tbody></table></div>
-        </section>
+        <div class="fleet-overview-riders-wrap">
+          <section class="fleet-overview-card">
+            <div class="fleet-overview-card-head fleet-overview-rider-head">
+              <div class="fleet-overview-section-title-wrap"><div class="fleet-overview-section-icon" aria-hidden="true">♟</div><div><div class="fleet-overview-card-title">List of Deployed Riders</div></div></div>
+              <div class="fleet-overview-rider-summaries">
+                <div class="fleet-overview-rider-summary"><span class="summary-icon">♟</span><span class="summary-copy"><span class="summary-label">TOTAL RIDERS</span><span class="summary-value">${riderTotals.total}</span></span></div>
+                <div class="fleet-overview-rider-summary"><span class="summary-icon">♧</span><span class="summary-copy"><span class="summary-label">2WH</span><span class="summary-value">${riderTotals.two}</span></span></div>
+                <div class="fleet-overview-rider-summary type-3w"><span class="summary-icon">▰</span><span class="summary-copy"><span class="summary-label">3WH</span><span class="summary-value">${riderTotals.three}</span></span></div>
+                <div class="fleet-overview-rider-summary type-4w"><span class="summary-icon">▱</span><span class="summary-copy"><span class="summary-label">4WH</span><span class="summary-value">${riderTotals.four}</span></span></div>
+                <div class="fleet-overview-rider-summary type-flexi"><span class="summary-icon">✦</span><span class="summary-copy"><span class="summary-label">FLEXI</span><span class="summary-value">${riderTotals.flexi}</span></span></div>
+              </div>
+              <div class="fleet-overview-rider-controls"><input id="fleetOverviewRiderSearch" class="fleet-overview-search" type="search" placeholder="Search rider, cluster or fleet type…" aria-label="Search deployed riders"><select id="fleetOverviewRiderFleetFilter" class="fleet-overview-filter" aria-label="Filter by fleet type"><option value="all">All fleet types</option><option value="2w">2WH</option><option value="3w">3WH</option><option value="4w">4WH</option><option value="flexi">Flexi</option><option value="other">Other</option></select></div>
+            </div>
+            <div class="fleet-overview-table-wrap"><table class="fleet-overview-table fleet-overview-modern-table fleet-overview-rider-table"><thead><tr><th>#</th><th class="left">Rider</th><th>Fleet Type</th><th class="left">Cluster</th><th>Parcels</th></tr></thead><tbody id="fleetOverviewRidersBody"></tbody></table></div>
+            <div class="fleet-overview-footer-note" id="fleetOverviewRiderCount"></div>
+          </section>
+        </div>
       </div>`;
+
+    function renderDeployedRiders(){
+      const search=nrm(root.querySelector('#fleetOverviewRiderSearch')?.value||'');
+      const fleetFilter=root.querySelector('#fleetOverviewRiderFleetFilter')?.value||'all';
+      const filtered=deployedRiders.filter(r=>{
+        if(fleetFilter!=='all'&&r.bucket!==fleetFilter)return false;
+        const haystack=nrm([r.name,r.id,r.vehicleType,r.clusters.join(' ')].join(' '));
+        return !search||haystack.includes(search);
+      });
+      const body=root.querySelector('#fleetOverviewRidersBody');
+      if(!body)return;
+      const vehicleLabel=r=>r.bucket==='2w'?'2WH':r.bucket==='3w'?'3WH':r.bucket==='4w'?'4WH':r.bucket==='flexi'?'Flexi':(r.vehicleType||'Other');
+      const rowsHtml=filtered.map((r,i)=>{
+        const typeClass=r.bucket==='3w'?'type-3w':r.bucket==='4w'?'type-4w':r.bucket==='flexi'?'type-flexi':'';
+        return `<tr><td class="num">${i+1}</td><td class="left">${esc(r.name)}</td><td class="num"><span class="fleet-overview-fleet-badge ${typeClass}">${esc(vehicleLabel(r))}</span></td><td class="left">${esc(r.clusters.join(', '))}</td><td class="num">${num(r.onFloor).toLocaleString()}</td></tr>`;
+      }).join('');
+      const totalFilteredParcels=filtered.reduce((sum,r)=>sum+num(r.onFloor),0);
+      const emptyRow=`<tr><td colspan="5" class="fleet-overview-empty">${deployedRiders.length?'No riders match this search or filter.':'No riders are assigned to planning groups yet.'}</td></tr>`;
+      const totalRow=`<tr class="fleet-overview-total"><td></td><td class="left">TOTAL · ${filtered.length} riders</td><td class="num">—</td><td class="left">All matching assignments</td><td class="num">${totalFilteredParcels.toLocaleString()}</td></tr>`;
+      body.innerHTML=(rowsHtml||emptyRow)+totalRow;
+      const counter=root.querySelector('#fleetOverviewRiderCount');
+      if(counter)counter.textContent=`Showing ${filtered.length} of ${deployedRiders.length} deployed riders · ${totalFilteredParcels.toLocaleString()} allocated parcels`;
+    }
+    root.querySelector('#fleetOverviewRiderSearch')?.addEventListener('input',renderDeployedRiders);
+    root.querySelector('#fleetOverviewRiderFleetFilter')?.addEventListener('change',renderDeployedRiders);
+    renderDeployedRiders();
 
     root.querySelector('#fleetOverviewFPTarget')?.addEventListener('change',e=>{const v=Math.max(1,Number(e.target.value)||50);try{NOL3Storage.set('nol3_fleet_productivity_v1:'+HUB_KEY(),String(v));}catch(_){ } window.dispatchEvent(new CustomEvent('planningchanged',{detail:{type:'fleet-productivity',source:'local'}})); render(root);});
     root.querySelector('#fleetOverview4WHTarget')?.addEventListener('change',e=>{const obj=loadSim(); const v=Number(e.target.value); obj.kpi4whUsageTarget=Number.isFinite(v)?Math.max(0,v):0.5; delete obj.kpi4whUsageTargetPct; saveSim(obj); render(root);});
