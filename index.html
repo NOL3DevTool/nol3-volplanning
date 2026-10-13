@@ -11956,7 +11956,7 @@ NOL3.pages.riders = function (root) {
     openClearProgress();
 
     try {
-      setClearProgress("prepare", 10, "Preparing clear…", "Operational uploads are local-only.");
+      setClearProgress("prepare", 10, "Preparing clear…", "Clearing LM, Incoming and Linehaul for this hub, including the cloud copy.");
       await nextPaint();
 
       // ONE batched local clear instead of three awaited clears plus multiple
@@ -11981,7 +11981,7 @@ NOL3.pages.riders = function (root) {
       setClearProgress("view", 82, "Refreshing the current page…", "Rebuilding only the page you are currently viewing.");
       await refreshCurrentPageAfterClear();
 
-      setClearProgress("done", 100, "Clear complete", "LM Inventory, Incoming Inventory, Linehaul, and saved operational history were cleared from this device.", "success");
+      setClearProgress("done", 100, "Clear complete", "LM Inventory, Incoming Inventory, Linehaul, and saved operational history were cleared from this device and the cloud.", "success");
       finishClearProgress(true, "Rider data, town arrangements, zone settings, and planning exceptions were not changed.");
     } catch (error) {
       console.error("NOL3: Could not clear uploaded files.", error);
@@ -13194,6 +13194,7 @@ NOL3.pages.riders = function (root) {
   // by stale/empty cloud state during refresh.
   let LOCAL_SETTINGS_DIRTY_KEY = `NOL3_LOCAL_SETTINGS_DIRTY_${HUB_CODE}`;
   let LOCAL_ROSTER_DIRTY_KEY = `NOL3_LOCAL_ROSTER_DIRTY_${HUB_CODE}`;
+  let LOCAL_FILES_DIRTY_KEY = `NOL3_LOCAL_FILES_DIRTY_${HUB_CODE}`;
   let RIDER_CLEAR_INTENT_KEY = `NOL3_RIDER_CLEAR_INTENT_${HUB_CODE}`;
   const markLocalDirty = key => { try { localStorage.setItem(key, String(Date.now())); } catch (_) {} };
   const getLocalDirty = key => { try { return Number(localStorage.getItem(key) || 0); } catch (_) { return 0; } };
@@ -13403,6 +13404,21 @@ NOL3.pages.riders = function (root) {
     async applyRemote(data) {
       if (!data) return;
       filesChannel.lastRemoteClearedByUser = data.clearedByUser === true;
+      filesChannel.applyingUntil = Date.now() + 5000;   // ignore local saves caused by this restore
+
+      // A tombstone means the user cleared one or more datasets on another
+      // device. Empty datasets in that snapshot must be cleared here too.
+      if (data.clearedByUser === true) {
+        const isEmpty = v => !(v && ((Array.isArray(v.rows) && v.rows.length) || v.fileName || v.rawText));
+        const clearOne = (prop, type) => {
+          if (!isEmpty(data[prop])) return;
+          NOL3[prop] = type === "lm" ? { files: [], rows: [], filteredRows: [] } : null;
+          try { window.NOL3FileStore?.remove?.(type); } catch (_) {}
+        };
+        clearOne("lmInventory", "lm");
+        clearOne("incomingInventory", "incoming");
+        clearOne("lineHaulInventory", "linehaul");
+      }
 
       if (data.lmInventory) {
         const lm = data.lmInventory;
@@ -13969,6 +13985,7 @@ NOL3.pages.riders = function (root) {
     META_KEY = `NOL3_CLOUD_LAST_APPLIED_${HUB_CODE}`;
     LOCAL_SETTINGS_DIRTY_KEY = `NOL3_LOCAL_SETTINGS_DIRTY_${HUB_CODE}`;
     LOCAL_ROSTER_DIRTY_KEY = `NOL3_LOCAL_ROSTER_DIRTY_${HUB_CODE}`;
+    LOCAL_FILES_DIRTY_KEY = `NOL3_LOCAL_FILES_DIRTY_${HUB_CODE}`;
     RIDER_CLEAR_INTENT_KEY = `NOL3_RIDER_CLEAR_INTENT_${HUB_CODE}`;
     FAILOVER_KEY = `NOL3_CLOUD_FAILOVER_${HUB_CODE}`;
     EGRESS_KEY = `NOL3_CLOUD_EGRESS_${HUB_CODE}`;
@@ -13988,6 +14005,8 @@ NOL3.pages.riders = function (root) {
   }
 
   window.addEventListener("hubchange", () => {
+    // Ignore inventory saves caused by the hub switch itself (per-hub restore).
+    filesChannel.applyingUntil = Date.now() + 8000;
     try { applyCloudHubContext(); } catch (error) { console.warn("NOL3: cloud hub context switch failed", error); }
     // Pull the newly selected hub's Settings + Riders instead of pushing the
     // previous hub's state into the new hub's cloud row.
@@ -13996,6 +14015,7 @@ NOL3.pages.riders = function (root) {
         await loadCloudConfig();
         await initialSyncChannel(settingsChannel);
         await initialSyncChannel(rosterChannel);
+        try { await initialSyncChannel(filesChannel); } catch (error) { console.warn("NOL3: selected hub inventory restore failed", error); }
         if (typeof NOL3.renderPage === "function") NOL3.renderPage(NOL3.getState()?.currentPage || "planning");
       } catch (error) { console.warn("NOL3: selected hub cloud restore failed", error); }
     }, 0);
@@ -14088,7 +14108,35 @@ NOL3.pages.riders = function (root) {
     return stableHash(snap);
   }
 
-  async function initialSyncChannel(channel) {
+  // Single-flight guard: the startup path, the hubchange handler and the push
+  // path can all ask for the same channel to initialise at once. They now share
+  // one in-flight request (per hub) instead of racing each other.
+  function initialSyncChannel(channel) {
+    const ctx = HUB_CODE;
+    if (channel._initPromise && channel._initCtx === ctx) return channel._initPromise;
+    const p = initialSyncChannelImpl(channel).finally(() => {
+      if (channel._initPromise === p) { channel._initPromise = null; channel._initCtx = null; }
+    });
+    channel._initPromise = p;
+    channel._initCtx = ctx;
+    return p;
+  }
+
+  // WAS MISSING: syncChannelOnce() called this but it was never defined, which
+  // threw "ensureChannelInitialized is not defined" whenever a channel had been
+  // reset (e.g. by a hubchange fired during an inventory upload).
+  async function ensureChannelInitialized(channel) {
+    if (channel.initialized) return true;
+    try {
+      await initialSyncChannel(channel);
+    } catch (e) {
+      window.__NOL3_LAST_CLOUD_ERROR = String((e && e.message) || e);
+      console.warn("NOL3 cloud: channel init failed", channel.dataType, e);
+    }
+    return !!channel.initialized;
+  }
+
+  async function initialSyncChannelImpl(channel) {
     if (!isSelectedHubCloudIdVerified()) {
       channel.initialized = true;
       channel.lastHash = "";
@@ -14125,12 +14173,14 @@ NOL3.pages.riders = function (root) {
       }
     }
 
-    const local = await channel.buildSnapshot();
+    let local = await channel.buildSnapshot();
     const dirtyKey = channel === settingsChannel
       ? LOCAL_SETTINGS_DIRTY_KEY
       : channel === rosterChannel
         ? LOCAL_ROSTER_DIRTY_KEY
-        : "";
+        : channel === filesChannel
+          ? LOCAL_FILES_DIRTY_KEY
+          : "";
     const localDirtyAt = dirtyKey ? getLocalDirty(dirtyKey) : 0;
 
     // Settings and the rider roster are small enough to read once on every
@@ -14153,7 +14203,9 @@ NOL3.pages.riders = function (root) {
 
       // No cloud record: publish valid local state once. Never publish an empty
       // roster/settings snapshot merely because the browser cache was empty.
-      if (snapshotHasData(channel, local) && !startupStamp) {
+      // Files are only published by an explicit upload (never at startup), so a
+      // hub switch can't copy the previous hub's in-memory inventory into this hub.
+      if (channel !== filesChannel && snapshotHasData(channel, local) && !startupStamp) {
         try {
           local.clientUpdatedAt = Math.max(localDirtyAt, Date.now());
           await pushSnapshotFor(channel, local);
@@ -14187,6 +14239,7 @@ NOL3.pages.riders = function (root) {
 
     if (localEditWins && localDirtyAt >= remoteTime) {
       try {
+        if (channel === filesChannel) local = mergeFilesSnapshotPreservingRemote(local, remoteSnapshot);
         local.clientUpdatedAt = Math.max(localDirtyAt, Date.now());
         channel.lastLocalMutationAt = local.clientUpdatedAt;
         await pushSnapshotFor(channel, local);
@@ -14247,8 +14300,8 @@ NOL3.pages.riders = function (root) {
     if (!isSelectedHubCloudIdVerified()) return false;
     if (channel.syncing || !configured() || applyingRemote) return false;
     if (!channel.initialized) {
-      await ensureChannelInitialized(channel);
-      if (!channel.initialized) return false;
+      const ready = await ensureChannelInitialized(channel);
+      if (!ready) throw new Error(window.__NOL3_LAST_CLOUD_ERROR || "Cloud channel not initialized yet");
     }
     channel.syncing = true;
     const syncCtx = HUB_CODE;
@@ -14258,6 +14311,13 @@ NOL3.pages.riders = function (root) {
       let local = null;
       if (allowPush) {
         local = await channel.buildSnapshot();
+        if (channel === filesChannel) {
+          // Never overwrite datasets another device uploaded (e.g. this device
+          // only uploaded LM, the cloud also holds Incoming). If the cloud copy
+          // can't be read we abort rather than push blind.
+          const cur = await readRemoteFor(channel);
+          if (cur?.data) local = mergeFilesSnapshotPreservingRemote(local, cur.data);
+        }
         const needsPush = snapshotHasData(channel, local) || channel.allowEmptyPush;
         if (needsPush && !(channel === filesChannel && channel.lastRemoteClearedByUser && !snapshotHasData(channel, local))) {
           if (channel === filesChannel && snapshotHasData(channel, local)) channel.lastRemoteClearedByUser = false;
@@ -14270,8 +14330,13 @@ NOL3.pages.riders = function (root) {
           try { localStorage.setItem(channel.metaKey, String(channel.lastLocalMutationAt)); } catch (_) {}
           if (channel === settingsChannel) clearLocalDirty(LOCAL_SETTINGS_DIRTY_KEY);
           if (channel === rosterChannel) clearLocalDirty(LOCAL_ROSTER_DIRTY_KEY);
+          if (channel === filesChannel) clearLocalDirty(LOCAL_FILES_DIRTY_KEY);
         }
       }
+
+      // An upload that hasn't reached the cloud yet must not be replaced by an
+      // older cloud copy.
+      if (channel === filesChannel && getLocalDirty(LOCAL_FILES_DIRTY_KEY)) return false;
 
       const stamps = await getRemoteStamps();
       const stamp = stamps[channel.dataType] || 0;
@@ -14309,8 +14374,14 @@ NOL3.pages.riders = function (root) {
     try {
       const a = await syncChannelOnce(settingsChannel, allowPush);
       const b = await syncChannelOnce(rosterChannel, allowPush);
-      status(a || b ? "SYNCED • CLOUD UPDATE" : "CONNECTED • LIVE", true);
-      if (a || b) {
+      // Inventory is pulled here (cheap stamp check; downloads only when another
+      // device changed it). It is only ever PUSHED by an upload, see pushFilesNow().
+      let c = false, filesErr = null;
+      try { c = await syncChannelOnce(filesChannel, false); }
+      catch (e) { filesErr = e; window.__NOL3_LAST_CLOUD_ERROR = String((e && e.message) || e); console.warn("NOL3 cloud: inventory pull failed", e); }
+      if (!filesErr) window.__NOL3_LAST_CLOUD_ERROR = "";
+      status(filesErr ? "CONNECTED • FILES RETRYING" : (a || b || c ? "SYNCED • CLOUD UPDATE" : "CONNECTED • LIVE"), !filesErr);
+      if (a || b || c) {
         try {
           if (typeof NOL3.renderPage === "function") NOL3.renderPage(NOL3.state?.currentPage || "planning");
         } catch (_) {}
@@ -14322,9 +14393,64 @@ NOL3.pages.riders = function (root) {
     }
   }
 
-  // Operational file cloud sync is intentionally disabled. Uploads stay in the
-  // browser's local store; SPX/FMS auto-sync repopulates them locally.
-  async function syncFiles(_allowPush = false) { return false; }
+  // Inventory (LM / Incoming / Linehaul) now syncs through filesChannel.
+  async function syncFiles(allowPush = false) { return syncChannelOnce(filesChannel, allowPush); }
+
+  // Push the current inventory to the cloud (called ~3s after an upload).
+  async function pushFilesNow() {
+    if (!isSelectedHubCloudIdVerified()) return false;
+    if (filesChannel.syncing || applyingRemote) { schedulePushCheck(filesChannel, pushFilesNow); return false; }
+    try {
+      status("SYNCING • FILES", null);
+      if (!filesChannel.initialized) {
+        const ready = await ensureChannelInitialized(filesChannel);
+        if (!ready) throw new Error(window.__NOL3_LAST_CLOUD_ERROR || "Cloud channel not initialized yet");
+        // Startup reconciliation already published the pending upload.
+        if (!getLocalDirty(LOCAL_FILES_DIRTY_KEY)) { status("SYNCED • FILES SAVED", true); return true; }
+      }
+      await syncChannelOnce(filesChannel, true);
+      filesChannel._retries = 0;
+      window.__NOL3_LAST_CLOUD_ERROR = "";
+      status("SYNCED • FILES SAVED", true);
+      return true;
+    } catch (error) {
+      window.__NOL3_LAST_CLOUD_ERROR = String((error && error.message) || error);
+      console.error("NOL3 cloud: inventory upload to cloud failed", error);
+      status("SYNC FAILED • FILES RETRYING", false);
+      // Local dirty marker is still set, so the upload is not lost. Retry a few times.
+      filesChannel._retries = (filesChannel._retries || 0) + 1;
+      if (filesChannel._retries <= 5) {
+        clearTimeout(filesChannel.pushTimer);
+        filesChannel.pushTimer = setTimeout(pushFilesNow, 20000);
+      }
+      return false;
+    }
+  }
+
+  // Every inventory save (Inventory tab, LM / Incoming / Linehaul uploads, Undo)
+  // goes through NOL3FileStore.put, so that is where we notice a change. The hook
+  // is armed only after startup reconciliation so restoring local data on page
+  // load can't be mistaken for a new upload, and ignores saves caused by a cloud
+  // restore or a hub switch.
+  const FILES_CLOUD_TYPES = new Set(["lm", "incoming", "linehaul", "unifiedInventory"]);
+  function installFilesUploadHook() {
+    const store = window.NOL3FileStore;
+    if (!store || typeof store.put !== "function" || store.put.__nol3Cloud) return;
+    const orig = store.put.bind(store);
+    const wrapped = async function (record) {
+      const result = await orig(record);
+      try {
+        if (filesChannel.armed && record && FILES_CLOUD_TYPES.has(String(record.type)) &&
+            !applyingRemote && Date.now() >= (filesChannel.applyingUntil || 0)) {
+          markLocalDirty(LOCAL_FILES_DIRTY_KEY);
+          schedulePushCheck(filesChannel, pushFilesNow);
+        }
+      } catch (_) {}
+      return result;
+    };
+    wrapped.__nol3Cloud = true;
+    store.put = wrapped;
+  }
 
   // Kept for any code elsewhere that calls window.NOL3CloudSync.syncNow().
   async function syncOnce() {
@@ -14349,10 +14475,51 @@ NOL3.pages.riders = function (root) {
     channel.pushTimer = setTimeout(() => runner(), channel.debounceMs);
   }
 
-  // Kept for compatibility with older Clear handlers. Operational uploads are
-  // local-only, so this function deliberately performs NO cloud write.
-  async function clearUploadedFilesCloud() {
+  // Publish a "cleared" snapshot so other devices (and a page refresh here) don't
+  // bring the old inventory back. `types` = "lm" | "incoming" | "linehaul" | "all"
+  // or an array of those. Datasets that were NOT cleared are kept from the cloud.
+  async function clearUploadedFilesCloud(types) {
+    if (!isSelectedHubCloudIdVerified()) return false;
+    const propOf = { lm: "lmInventory", incoming: "incomingInventory", linehaul: "lineHaulInventory" };
+    const list = (Array.isArray(types) ? types : [types || "all"]);
+    const cleared = new Set();
+    list.forEach(t => { if (t === "all") Object.values(propOf).forEach(v => cleared.add(v)); else if (propOf[t]) cleared.add(propOf[t]); });
+    if (!cleared.size) return false;
+    const cur = await readRemoteFor(filesChannel);
+    let snap = await filesChannel.buildSnapshot();
+    if (cur?.data) snap = mergeFilesSnapshotPreservingRemote(snap, cur.data);
+    cleared.forEach(k => { snap[k] = null; });
+    if (cleared.has("incomingInventory")) snap.arrivedIncomingTasks = [];
+    snap.clearedByUser = true;
+    snap.clearedAt = Date.now();
+    snap.clientUpdatedAt = Date.now();
+    await pushSnapshotFor(filesChannel, snap);
+    filesChannel.initialized = true;
+    filesChannel.lastRemoteUpdatedAt = snap.clientUpdatedAt;
+    filesChannel.lastLocalMutationAt = snap.clientUpdatedAt;
+    filesChannel.lastRemoteClearedByUser = true;
+    try { localStorage.setItem(filesChannel.metaKey, String(snap.clientUpdatedAt)); } catch (_) {}
+    clearLocalDirty(LOCAL_FILES_DIRTY_KEY);
     return true;
+  }
+
+  async function flushFilesClear() {
+    const pending = Array.from(filesChannel._pendingClear || []);
+    filesChannel._pendingClear = new Set();
+    if (!pending.length) return;
+    try {
+      status("SYNCING • FILES", null);
+      await clearUploadedFilesCloud(pending);
+      window.__NOL3_LAST_CLOUD_ERROR = "";
+      status("SYNCED • FILES CLEARED", true);
+    } catch (error) {
+      window.__NOL3_LAST_CLOUD_ERROR = String((error && error.message) || error);
+      console.error("NOL3 cloud: could not publish inventory clear", error);
+      status("SYNC FAILED • FILES RETRYING", false);
+      pending.forEach(t => filesChannel._pendingClear.add(t));
+      clearTimeout(filesChannel._clearTimer);
+      filesChannel._clearTimer = setTimeout(flushFilesClear, 20000);
+    }
   }
 
   async function clearRosterCloud() {
@@ -14366,15 +14533,17 @@ NOL3.pages.riders = function (root) {
     return snap;
   }
 
-  // Kept for compatibility with the SPX/FMS upload path. Operational uploads
-  // must never be written to the cloud.
+  // Push the current inventory right now (skips the 3s debounce).
   async function commitFilesUploadNow() {
-    return false;
+    clearTimeout(filesChannel.pushTimer);
+    markLocalDirty(LOCAL_FILES_DIRTY_KEY);
+    return pushFilesNow();
   }
 
   window.NOL3CloudSync = {
     syncNow: syncOnce,
     commitFilesUploadNow,
+    syncFiles,
     clearUploadedFilesCloud,
     clearRosterCloud,
     usage: readEgress,
@@ -14400,6 +14569,10 @@ NOL3.pages.riders = function (root) {
       NOL3Storage.set("nol3_business_day_date_v1", today);
     } catch (_) {}
 
+    installFilesUploadHook();
+    // Safety net: arm the upload hook even if startup reconciliation never finishes.
+    setTimeout(() => { filesChannel.armed = true; }, 20000);
+
     loadCloudConfig().then(async () => {
       // Reconcile cloud Settings + Riders without triggering intermediate page
       // rebuilds. The current page is rendered once after both channels finish.
@@ -14422,6 +14595,17 @@ NOL3.pages.riders = function (root) {
         console.info("NOL3 startup: roster restore complete", { rows: NOL3?.riderData?.rows?.length || 0 });
       } catch (error) {
         window.__NOL3_LAST_CLOUD_ERROR = String((error && error.message) || error); console.error("NOL3 startup: roster restore failed", error);
+      }
+
+      // Inventory restore is independent too: a failure here must never block
+      // settings or riders.
+      let filesOk = false;
+      try {
+        await initialSyncChannel(filesChannel);
+        filesOk = true;
+        console.info("NOL3 startup: inventory restore complete");
+      } catch (error) {
+        window.__NOL3_LAST_CLOUD_ERROR = String((error && error.message) || error); console.error("NOL3 startup: inventory restore failed", error);
       }
 
       // Last-resort recovery: bypass the channel state machine completely and
@@ -14497,6 +14681,7 @@ NOL3.pages.riders = function (root) {
       }
 
       window.__NOL3_CLOUD_STARTUP_SYNC = false;
+      filesChannel.armed = true;   // from now on, inventory saves are treated as uploads
       // Perform exactly one final render after all cloud reconciliation is done.
       requestAnimationFrame(() => {
         try {
@@ -14520,6 +14705,9 @@ NOL3.pages.riders = function (root) {
       setTimeout(async () => {
         if (!settingsOk) {
           try { await initialSyncChannel(settingsChannel); } catch (error) { console.warn("NOL3 startup retry: settings", error); }
+        }
+        if (!filesOk) {
+          try { await initialSyncChannel(filesChannel); } catch (error) { console.warn("NOL3 startup retry: inventory", error); }
         }
         if (!rosterOk && !(Array.isArray(NOL3?.riderData?.rows) && NOL3.riderData.rows.length)) {
           try { await initialSyncChannel(rosterChannel); } catch (error) { console.warn("NOL3 startup retry: roster", error); }
@@ -14592,9 +14780,18 @@ NOL3.pages.riders = function (root) {
     }
   });
 
-  window.addEventListener("inventorycleared", (_event) => {
-    // Operational uploaded files are LOCAL-ONLY; clearing them must not write
-    // an empty snapshot/tombstone to the cloud.
+  window.addEventListener("inventorycleared", (event) => {
+    // Only a deliberate user Clear is published. Programmatic clears (hub switch,
+    // restore, undo bookkeeping) never carry source:"manual" and are ignored.
+    if (applyingRemote || event?.detail?.source !== "manual") return;
+    const t = String(event?.detail?.type || "all");
+    if (!["lm", "incoming", "linehaul", "all"].includes(t)) return;
+    filesChannel._pendingClear = filesChannel._pendingClear || new Set();
+    filesChannel._pendingClear.add(t);
+    clearTimeout(filesChannel.pushTimer);          // a pending upload push is now moot
+    clearLocalDirty(LOCAL_FILES_DIRTY_KEY);
+    clearTimeout(filesChannel._clearTimer);
+    filesChannel._clearTimer = setTimeout(flushFilesClear, 1500);
   });
 })();
 </script>
