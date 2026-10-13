@@ -11579,10 +11579,11 @@ NOL3.pages.riders = function (root) {
 
 
 
-/* NOL3 device-only operational store.
- * Operational uploads stay on this browser/device. They are never uploaded to
- * Firebase/Supabase. IndexedDB is the durable large-data store when available;
- * localStorage is retained as a compatibility/fallback cache.
+/* NOL3 operational store - MEMORY ONLY.
+ * Uploaded inventory is held in page memory for the current session and is
+ * saved to the Cloudflare R2 bucket (see the cloud sync script). NOTHING is
+ * written to localStorage, IndexedDB or any other Chrome/device storage, and
+ * any older device copies are ignored. The bucket is the only copy.
  */
 (function () {
   const records = new Map();
@@ -11651,7 +11652,8 @@ NOL3.pages.riders = function (root) {
     }
     return chosen;
   }
-  function persistLocal(record, hub = currentHubCode(), force = false) {
+  function persistLocal() { return false; } // memory only: never written to Chrome storage
+  function _legacyPersistLocal(record, hub = currentHubCode(), force = false) {
     if (!record || !PERSIST_TYPES.has(String(record.type))) return false;
     try {
       const compact = compactRecord(record);
@@ -11664,7 +11666,8 @@ NOL3.pages.riders = function (root) {
       return false;
     }
   }
-  function parseLocalRecord(type, hub = currentHubCode()) {
+  function parseLocalRecord() { return null; } // memory only: old device copies are ignored
+  function _legacyParseLocalRecord(type, hub = currentHubCode()) {
     const keys = [persistKey(type, hub), `${PREVIOUS_PREFIX}${hub}:${String(type)}`];
     // Migrate old unscoped Incoming/Linehaul cache only for Badoc.
     if (hub === "BADOC" && ["incoming", "linehaul"].includes(type)) keys.push(legacyKey(type));
@@ -11683,7 +11686,8 @@ NOL3.pages.riders = function (root) {
     }
     return null;
   }
-  function openDb() {
+  function openDb() { return Promise.resolve(null); } // memory only: IndexedDB is not used
+  function _legacyOpenDb() {
     if (dbPromise) return dbPromise;
     dbPromise = new Promise((resolve, reject) => {
       if (!window.indexedDB) { reject(new Error("IndexedDB is unavailable")); return; }
@@ -11754,7 +11758,7 @@ NOL3.pages.riders = function (root) {
       const prefix = `${HISTORY_PREFIX}${hub}:`;
       for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
-        if (!key || !key.startsWith(prefix)) continue;
+        continue; // memory only: ignore any old device copy of LM history
         try {
           const record = JSON.parse(localStorage.getItem(key) || "null");
           if (record?.businessDate) histories.set(`${hub}:${record.businessDate}`, record);
@@ -11785,7 +11789,13 @@ NOL3.pages.riders = function (root) {
   }
 
   const storageKeyForEntry = (hub, type) => `${hub}:${type}`;
-  async function persistRecord(record, hub = currentHubCode()) {
+  async function persistRecord(record) {
+    if (!record || !PERSIST_TYPES.has(String(record.type))) return true;
+    const type = String(record.type);
+    records.set(type, chooseMoreComplete(type, records.get(type), compactRecord(record)));
+    return true; // memory only
+  }
+  async function _legacyPersistRecord(record, hub = currentHubCode()) {
     if (!record || !PERSIST_TYPES.has(String(record.type))) return true;
     const type = String(record.type);
     const compact = compactRecord(record);
@@ -11831,14 +11841,7 @@ NOL3.pages.riders = function (root) {
       const best = chooseMoreComplete(type, records.get(type), compact);
       records.set(type, clone(best));
       if (PERSIST_TYPES.has(type)) return persistRecord(best);
-      // Small/undo metadata is kept in this device database too, but never synced.
-      const hub = currentHubCode();
-      const entry = { key: storageKeyForEntry(hub, type), hubCode: hub, kind: "record", type, record: compact, savedAt: new Date().toISOString() };
-      const ok = await idbPut(entry);
-      if (!ok && type === "unifiedInventoryUndo") {
-        try { localStorage.setItem(persistKey(type, hub), JSON.stringify(compact)); return true; } catch (_) { return false; }
-      }
-      return ok;
+      return true; // memory only
     },
     remove(type) {
       const key = String(type), hub = currentHubCode();
@@ -11851,29 +11854,12 @@ NOL3.pages.riders = function (root) {
     async putHistory(record) {
       if (!record || !record.businessDate) return false;
       const hub = currentHubCode(), date = String(record.businessDate).trim();
-      const compact = compactHistory(record), key = historyCacheKey(hub, date);
-      histories.set(key, clone(compact));
-      let localSaved = false;
-      try {
-        const raw = JSON.stringify(compact);
-        if (raw.length <= LOCAL_CACHE_LIMIT) { localStorage.setItem(historyKey(date, hub), raw); localSaved = true; }
-      } catch (_) {}
-      const entry = { key: `${hub}:history:${date}`, hubCode: hub, kind: "history", record: compact, savedAt: new Date().toISOString() };
-      const dbSaved = await idbPut(entry);
-      if (!dbSaved && !localSaved) {
-        try { localStorage.setItem(historyKey(date, hub), JSON.stringify(compact)); localSaved = true; } catch (error) { console.error("NOL3: LM history could not be saved to device storage.", error); }
-      }
-      return dbSaved || localSaved;
+      histories.set(historyCacheKey(hub, date), clone(compactHistory(record)));
+      return true; // memory only (this session)
     },
     getHistory(date) {
       const hub = currentHubCode(), d = String(date || "").trim(), key = historyCacheKey(hub, d);
       if (histories.has(key)) return clone(histories.get(key));
-      const indexed = idbRecords.get(`${hub}:history:${d}`)?.record;
-      if (indexed) { histories.set(key, indexed); return clone(indexed); }
-      try {
-        const local = JSON.parse(localStorage.getItem(historyKey(d, hub)) || "null");
-        if (local) { histories.set(key, local); return clone(local); }
-      } catch (_) {}
       return null;
     },
     async removeHistory(date) {
@@ -14138,9 +14124,50 @@ NOL3.pages.riders = function (root) {
   }
 
   window.addEventListener("hubchange", () => {
-    // Ignore inventory saves caused by the hub switch itself (per-hub restore).
+    // The bucket is the ONLY copy of uploaded inventory (nothing is kept in
+    // Chrome storage), so:
+    //  1) an upload that has not reached the bucket yet is saved for the hub we
+    //     are LEAVING (using that hub's own code) before anything else happens;
+    //  2) the hub we are switching TO is always loaded from the bucket.
+    const leavingCode = HUB_CODE;
+    const leavingDirtyKey = LOCAL_FILES_DIRTY_KEY;
+    const nextCode = String((NOL3.getSelectedHubConfig?.() || {}).code || leavingCode);
+    const sameHub = nextCode === leavingCode;
+    const pendingUpload = (() => { try { return !!getLocalDirty(leavingDirtyKey); } catch (_) { return false; } })();
+    let flush = null;
+    try {
+      if (!sameHub && pendingUpload && isSelectedHubCloudIdVerified()) {
+        clearTimeout(filesChannel.pushTimer);
+        const snapPromise = filesChannel.buildSnapshot();   // built synchronously: still the leaving hub's data
+        flush = (async () => {
+          let snap = await snapPromise;
+          if (!snapshotHasData(filesChannel, snap)) return;
+          try {
+            const row = await r2Raw.readRow(leavingCode, filesChannel.dataType);
+            if (row && row.data) {
+              const cur = await unpackSnapshot(row.data);
+              if (cur && (!cur.hubCode || String(cur.hubCode) === String(leavingCode))) snap = mergeFilesSnapshotPreservingRemote(snap, cur);
+            }
+          } catch (_) {}
+          snap.clientUpdatedAt = Date.now();
+          await r2Raw.writeRow(leavingCode, filesChannel.dataType, await encodeForUpload(filesChannel, snap));
+          clearLocalDirty(leavingDirtyKey);
+          invalidateStamps();
+        })().catch(e => console.warn("NOL3 cloud: could not save the previous hub's upload before switching", e));
+      }
+    } catch (_) {}
+    filesChannel._flushPromise = flush;
+
+    // Ignore inventory saves caused by the hub switch itself.
     filesChannel.applyingUntil = Date.now() + 8000;
     try { applyCloudHubContext(); } catch (error) { console.warn("NOL3: cloud hub context switch failed", error); }
+    if (sameHub && pendingUpload) {
+      // Same hub (e.g. station detection): keep the pending upload alive.
+      clearTimeout(filesChannel.pushTimer);
+      filesChannel.pushTimer = setTimeout(pushFilesNow, 800);
+    } else if (!sameHub) {
+      try { clearLocalDirty(LOCAL_FILES_DIRTY_KEY); } catch (_) {}   // memory-only: a stale marker means nothing
+    }
     // Pull the newly selected hub's Settings + Riders instead of pushing the
     // previous hub's state into the new hub's cloud row.
     setTimeout(async () => {
@@ -14148,34 +14175,23 @@ NOL3.pages.riders = function (root) {
         await loadCloudConfig();
         await initialSyncChannel(settingsChannel);
         await initialSyncChannel(rosterChannel);
-        // The device copy is the source of truth for inventory. Only download the
-        // hub's inventory from the cloud when this device has NONE saved for it.
-        // (Previously every hub switch downloaded the full snapshot - the "MB
-        // used" counter - and could replace newer local data with an older copy.)
-        let deviceHasInventory = false;
         try {
           await window.NOL3FileStore?.ready?.();
           window.NOL3FileStore?.switchHub?.();
-          // Anything this device is missing for the hub is restored from the cloud.
-          try { await restoreMissingInventoryFromCloud(); window.NOL3FileStore?.switchHub?.(); } catch (_) {}
-          deviceHasInventory = ["unifiedInventory", "lm", "incoming", "linehaul"].some(t => {
-            const r = window.NOL3FileStore?.get?.(t);
-            return !!(r && r.dataset && ((Array.isArray(r.dataset.rows) && r.dataset.rows.length) || r.dataset.fileName));
-          });
+          if (flush) { try { await flush; } catch (_) {} }
+          // Always load this hub's uploaded inventory from the bucket.
+          try { await restoreMissingInventoryFromCloud(!sameHub); window.NOL3FileStore?.switchHub?.(); }
+          catch (error) { console.warn("NOL3: selected hub inventory restore failed", error); }
         } catch (_) {}
-        if (deviceHasInventory) {
-          try {
-            const stamps = await getRemoteStamps(true);
-            const st = Number(stamps[filesChannel.dataType] || 0);
-            filesChannel.initialized = true;
-            filesChannel.lastStamp = st;
-            filesChannel.lastRemoteUpdatedAt = st;
-            filesChannel.lastLocalMutationAt = Math.max(st, Date.now());
-            filesChannel.lastHash = `device-first:${st}`;
-          } catch (_) { filesChannel.initialized = true; }
-        } else {
-          try { await initialSyncChannel(filesChannel); } catch (error) { console.warn("NOL3: selected hub inventory restore failed", error); }
-        }
+        try {
+          const stamps = await getRemoteStamps(true);
+          const st = Number(stamps[filesChannel.dataType] || 0);
+          filesChannel.initialized = true;
+          filesChannel.lastStamp = st;
+          filesChannel.lastRemoteUpdatedAt = st;
+          filesChannel.lastLocalMutationAt = Math.max(st, Date.now());
+          filesChannel.lastHash = `bucket-loaded:${st}`;
+        } catch (_) { filesChannel.initialized = true; }
         if (typeof NOL3.renderPage === "function") NOL3.renderPage(NOL3.getState()?.currentPage || "planning");
         try { if (typeof NOL3.updateInventoryUploadSummaries === "function") await NOL3.updateInventoryUploadSummaries(); } catch (_) {}
       } catch (error) { console.warn("NOL3: selected hub cloud restore failed", error); }
@@ -14343,10 +14359,11 @@ NOL3.pages.riders = function (root) {
     if (patch.lineHaulInventory) await fs.put(mk("linehaul", patch.lineHaulInventory));
   }
 
-  async function restoreMissingInventoryFromCloud() {
+  // force = true: always load this hub's inventory from the bucket (hub switch).
+  async function restoreMissingInventoryFromCloud(force) {
     if (!isSelectedHubCloudIdVerified() || !configured()) return false;
     try { await window.NOL3FileStore?.ready?.(); } catch (_) {}
-    const present = localInventoryPresence();
+    const present = force ? { lm: false, incoming: false, linehaul: false } : localInventoryPresence();
     if (present.lm && present.incoming && present.linehaul) return false;   // nothing missing
     const ctx = HUB_CODE;
     const remote = await readRemoteFor(filesChannel);
@@ -14362,6 +14379,27 @@ NOL3.pages.riders = function (root) {
     filesChannel.applyingUntil = Date.now() + 30000;
     await filesChannel.applyRemote(patch);
     await persistInventoryLocally(patch);
+    // Rebuild the combined "unified" record (memory only) so the next upload
+    // is stacked on top of the data that came back from the bucket.
+    try {
+      const lmInv = patch.lmInventory, incInv = patch.incomingInventory;
+      if (lmInv || incInv) {
+        const lmRows = Array.isArray(lmInv?.rows) ? lmInv.rows : [];
+        const incomingRows = Array.isArray(incInv?.rows) ? incInv.rows : [];
+        const headers = (Array.isArray(lmInv?.headers) && lmInv.headers.length) ? lmInv.headers : (Array.isArray(incInv?.headers) ? incInv.headers : []);
+        const srcFiles = (Array.isArray(lmInv?.files) && lmInv.files.length) ? lmInv.files : (Array.isArray(incInv?.files) ? incInv.files : []);
+        await window.NOL3FileStore.put({
+          type: "unifiedInventory",
+          files: srcFiles.map(f => ({ name: (f && f.name) || "inventory.csv", lastModified: (f && f.lastModified) || 0 })),
+          dataset: {
+            fileName: lmInv?.fileName || incInv?.fileName || "",
+            headers, rows: [...lmRows, ...incomingRows], lmRows, incomingRows, rawText: "",
+            loadedAt: lmInv?.loadedAt || incInv?.loadedAt || new Date().toISOString()
+          },
+          savedAt: new Date().toISOString()
+        });
+      }
+    } catch (e) { console.warn("NOL3: could not rebuild unified inventory record", e); }
     filesChannel.applyingUntil = Date.now() + 10000;
     // The page-load runtime restore may have cleared memory in between; re-apply if so.
     const stillMissing =
@@ -14684,20 +14722,30 @@ NOL3.pages.riders = function (root) {
   function installFilesUploadHook() {
     const store = window.NOL3FileStore;
     if (!store || typeof store.put !== "function" || store.put.__nol3Cloud) return;
+    // Memory-only store: a dirty marker left by a previous page load refers to
+    // data that no longer exists, so drop it.
+    try { clearLocalDirty(LOCAL_FILES_DIRTY_KEY); } catch (_) {}
     const orig = store.put.bind(store);
     const wrapped = async function (record) {
       const result = await orig(record);
       try {
-        if (filesChannel.armed && record && FILES_CLOUD_TYPES.has(String(record.type)) &&
+        if (record && FILES_CLOUD_TYPES.has(String(record.type)) &&
             !applyingRemote && Date.now() >= (filesChannel.applyingUntil || 0)) {
+          // Upload goes straight to the bucket (short delay only so the several
+          // saves of one upload are sent as a single request).
           markLocalDirty(LOCAL_FILES_DIRTY_KEY);
-          schedulePushCheck(filesChannel, pushFilesNow);
+          clearTimeout(filesChannel.pushTimer);
+          filesChannel.pushTimer = setTimeout(pushFilesNow, 800);
         }
       } catch (_) {}
       return result;
     };
     wrapped.__nol3Cloud = true;
     store.put = wrapped;
+    // The bucket is the only copy: warn before closing while an upload is unsent.
+    window.addEventListener("beforeunload", (e) => {
+      try { if (getLocalDirty(LOCAL_FILES_DIRTY_KEY)) { e.preventDefault(); e.returnValue = ""; } } catch (_) {}
+    });
   }
 
   // Kept for any code elsewhere that calls window.NOL3CloudSync.syncNow().
@@ -14972,8 +15020,8 @@ NOL3.pages.riders = function (root) {
         }
       });
 
-      // Operational uploaded files are intentionally NOT restored from cloud.
-      // They remain local and are populated by the SPX/FMS auto-sync path.
+      // Uploaded inventory lives only in the Cloudflare bucket; it is loaded
+      // from there on startup and on every hub switch.
       if (settingsOk && rosterOk) status("CONNECTED • LIVE", true);
       else if (rosterOk) status("CONNECTED • SETTINGS RETRYING", false);
       else if (settingsOk) status("CONNECTED • RIDERS RETRYING", false);
@@ -16919,7 +16967,8 @@ NOL3.clearRiderData = async function () {
 (function () {
   const KEY = "NOL3_FORWARD_PLANNING_AUTHORITY_V8";
 
-  const readStore = () => {
+  const readStore = () => ({}); // memory only
+  const _legacyReadStore = () => {
     try {
       const raw = (window.NOL3Storage && typeof NOL3Storage.get === "function")
         ? NOL3Storage.get(KEY)
@@ -16928,7 +16977,8 @@ NOL3.clearRiderData = async function () {
       return parsed && typeof parsed === "object" ? parsed : {};
     } catch (_) { return {}; }
   };
-  const writeStore = (store) => {
+  const writeStore = () => false; // memory only
+  const _legacyWriteStore = (store) => {
     try {
       const raw = JSON.stringify(store || {});
       if (window.NOL3Storage && typeof NOL3Storage.set === "function") NOL3Storage.set(KEY, raw);
@@ -17103,14 +17153,16 @@ NOL3.clearRiderData = async function () {
   const slot = (h, d) => `${String(h || '').trim()}::${String(d || '').trim()}`;
   const cloneRows = rows => Array.isArray(rows) ? rows.map(r => Array.isArray(r) ? [...r] : r) : [];
 
-  const readStore = () => {
+  const readStore = () => ({}); // memory only
+  const _legacyReadStore = () => {
     try {
       const raw = window.localStorage.getItem(KEY);
       const v = raw ? JSON.parse(raw) : {};
       return v && typeof v === 'object' ? v : {};
     } catch (_) { return {}; }
   };
-  const writeStore = store => {
+  const writeStore = () => false; // memory only
+  const _legacyWriteStore = store => {
     try {
       window.localStorage.setItem(KEY, JSON.stringify(store || {}));
       return true;
