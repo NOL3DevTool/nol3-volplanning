@@ -2730,7 +2730,7 @@ th{color:#667085;font-weight:650}
         <span>!</span>
       </div>
       <h3 class="clear-confirm-title" id="clearConfirmTitle">Clear Uploaded Files?</h3>
-      <p class="clear-confirm-text" id="clearConfirmText">This will permanently remove the uploaded operational files for the selected hub from this device.</p>
+      <p class="clear-confirm-text" id="clearConfirmText">This will permanently remove the uploaded operational files for the selected hub from this device and delete them from the cloud bucket.</p>
 
       <div class="clear-confirm-section">
         <div class="clear-confirm-section-title">Will be cleared</div>
@@ -2746,7 +2746,7 @@ th{color:#667085;font-weight:650}
         <strong>Will NOT be cleared:</strong> Rider data, town arrangements, zone settings, and planning exceptions.
       </div>
 
-      <div class="clear-confirm-note">Operational uploads are local-only in this build. This action clears this device only.</div>
+      <div class="clear-confirm-note">The uploaded file is also deleted from the Cloudflare bucket, so other devices will no longer receive it. Other devices keep any copy they already loaded until they press CLEAR.</div>
 
       <div class="clear-confirm-actions">
         <button class="clear-confirm-cancel" id="cancelClearConfirmBtn" type="button">Cancel</button>
@@ -12084,11 +12084,25 @@ NOL3.pages.riders = function (root) {
         window.dispatchEvent(new CustomEvent("inventorycleared", { detail: { type: "all", source: "manual" } }));
       } catch (_) {}
 
-      setClearProgress("view", 82, "Refreshing the current page…", "Rebuilding only the page you are currently viewing.");
+      // Delete this hub's uploaded-files object from the Cloudflare R2 bucket so
+      // nothing is left to sync back. A failed delete retries automatically.
+      setClearProgress("history", 75, "Deleting the uploaded file from the cloud…", "Removing this hub's file from the Cloudflare bucket.");
+      let cloudOk = true, cloudMsg = "";
+      try {
+        const cs = window.NOL3CloudSync;
+        if (cs && typeof cs.flushFilesClear === "function") cloudOk = await cs.flushFilesClear(true);
+      } catch (e) { cloudOk = false; cloudMsg = e?.message || ""; }
+      if (!cloudOk) cloudMsg = cloudMsg || window.__NOL3_LAST_CLOUD_ERROR || "cloud unreachable";
+
+      setClearProgress("view", 85, "Refreshing the current page…", "Rebuilding only the page you are currently viewing.");
       await refreshCurrentPageAfterClear();
 
-      setClearProgress("done", 100, "Clear complete", "LM Inventory, Incoming Inventory, Linehaul, and saved operational history were cleared from this device and the cloud.", "success");
-      finishClearProgress(true, "Rider data, town arrangements, zone settings, and planning exceptions were not changed.");
+      if (cloudOk) {
+        setClearProgress("done", 100, "Clear complete", "LM Inventory, Incoming Inventory, Linehaul, and saved operational history were cleared from this device and deleted from the cloud bucket.", "success");
+        finishClearProgress(true, "Rider data, town arrangements, zone settings, and planning exceptions were not changed.");
+      } else {
+        finishClearProgress(false, `Cleared on this device, but the cloud file could not be deleted (${cloudMsg}). It will retry automatically while this page stays open.`);
+      }
     } catch (error) {
       console.error("NOL3: Could not clear uploaded files.", error);
       finishClearProgress(false, `The clear operation encountered an error: ${error?.message || "unknown error"}`);
@@ -13859,6 +13873,11 @@ NOL3.pages.riders = function (root) {
       });
       const out = r.text ? JSON.parse(r.text) : {};
       return out.updated_at || new Date().toISOString();
+    },
+    // Permanently deletes the object from the R2 bucket (404 = already gone = fine).
+    async deleteRow(code, dataType) {
+      await r2Fetch(`${hubPath(code)}/data/${encodeURIComponent(dataType)}`, { method: "DELETE" });
+      return true;
     }
   };
 
@@ -14714,11 +14733,37 @@ NOL3.pages.riders = function (root) {
     const cleared = new Set();
     list.forEach(t => { if (t === "all") Object.values(propOf).forEach(v => cleared.add(v)); else if (propOf[t]) cleared.add(propOf[t]); });
     if (!cleared.size) return false;
+
+    // Delete the whole file object from the R2 bucket so nothing is left to sync.
+    const deleteFilesObject = async () => {
+      const ctxCode = HUB_CODE;
+      await r2Raw.deleteRow(ctxCode, filesChannel.dataType);
+      if (ctxCode !== HUB_CODE) return true; // hub switched mid-request; nothing local to update
+      const now = Date.now();
+      filesChannel.initialized = true;
+      filesChannel.lastStamp = 0;
+      filesChannel.lastRemoteUpdatedAt = now;
+      filesChannel.lastLocalMutationAt = now;
+      filesChannel.lastRemoteClearedByUser = false;
+      try { localStorage.setItem(filesChannel.metaKey, String(now)); } catch (_) {}
+      clearLocalDirty(LOCAL_FILES_DIRTY_KEY);
+      invalidateStamps();
+      return true;
+    };
+
+    // Everything cleared (the main CLEAR button) -> delete the object, no read needed.
+    if (cleared.size >= Object.keys(propOf).length) return deleteFilesObject();
+
     const cur = await readRemoteFor(filesChannel);
     let snap = await filesChannel.buildSnapshot();
     if (cur?.data) snap = mergeFilesSnapshotPreservingRemote(snap, cur.data);
     cleared.forEach(k => { snap[k] = null; });
     if (cleared.has("incomingInventory")) snap.arrivedIncomingTasks = [];
+
+    // Partial clear that leaves the bucket object completely empty -> delete it too.
+    const hasData = v => !!(v && ((Array.isArray(v.rows) && v.rows.length) || v.fileName || v.rawText));
+    if (!Object.values(propOf).some(k => hasData(snap[k]))) return deleteFilesObject();
+
     snap.clearedByUser = true;
     snap.clearedAt = Date.now();
     snap.clientUpdatedAt = Date.now();
@@ -14732,15 +14777,18 @@ NOL3.pages.riders = function (root) {
     return true;
   }
 
-  async function flushFilesClear() {
+  async function flushFilesClear(force) {
+    clearTimeout(filesChannel._clearTimer);
+    if (force) { filesChannel._pendingClear = filesChannel._pendingClear || new Set(); filesChannel._pendingClear.add("all"); }
     const pending = Array.from(filesChannel._pendingClear || []);
     filesChannel._pendingClear = new Set();
-    if (!pending.length) return;
+    if (!pending.length) return true;
     try {
       status("SYNCING • FILES", null);
       await clearUploadedFilesCloud(pending);
       window.__NOL3_LAST_CLOUD_ERROR = "";
       status("SYNCED • FILES CLEARED", true);
+      return true;
     } catch (error) {
       window.__NOL3_LAST_CLOUD_ERROR = String((error && error.message) || error);
       console.error("NOL3 cloud: could not publish inventory clear", error);
@@ -14748,6 +14796,7 @@ NOL3.pages.riders = function (root) {
       pending.forEach(t => filesChannel._pendingClear.add(t));
       clearTimeout(filesChannel._clearTimer);
       filesChannel._clearTimer = setTimeout(flushFilesClear, 20000);
+      return false;
     }
   }
 
@@ -14774,6 +14823,7 @@ NOL3.pages.riders = function (root) {
     commitFilesUploadNow,
     syncFiles,
     clearUploadedFilesCloud,
+    flushFilesClear,
     clearRosterCloud,
     usage: readEgress,
     setAccessKey(key) { try { localStorage.setItem(R2_TOKEN_KEY, String(key || "").trim()); } catch (_) {} return r2Configured(); },
