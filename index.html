@@ -14137,6 +14137,8 @@ NOL3.pages.riders = function (root) {
         try {
           await window.NOL3FileStore?.ready?.();
           window.NOL3FileStore?.switchHub?.();
+          // Anything this device is missing for the hub is restored from the cloud.
+          try { await restoreMissingInventoryFromCloud(); window.NOL3FileStore?.switchHub?.(); } catch (_) {}
           deviceHasInventory = ["unifiedInventory", "lm", "incoming", "linehaul"].some(t => {
             const r = window.NOL3FileStore?.get?.(t);
             return !!(r && r.dataset && ((Array.isArray(r.dataset.rows) && r.dataset.rows.length) || r.dataset.fileName));
@@ -14272,6 +14274,87 @@ NOL3.pages.riders = function (root) {
     return !!channel.initialized;
   }
 
+  // The Worker stamps each saved record with ITS OWN clock (updated_at), but the
+  // page used to remember only ITS clock. The two never matched, so every
+  // refresh looked like "the cloud copy is newer" and re-downloaded the full
+  // inventory (the growing "MB used"). Remember the Worker's stamp too.
+  const stampKeyFor = channel => `${channel.metaKey}_STAMP`;
+  function rememberStamp(channel, stamp) {
+    try { if (Number(stamp) > 0) localStorage.setItem(stampKeyFor(channel), String(Number(stamp))); } catch (_) {}
+  }
+  const readSavedStamp = channel => { try { return Number(localStorage.getItem(stampKeyFor(channel)) || 0); } catch (_) { return 0; } };
+
+  // ===== INVENTORY RECOVERY FROM CLOUD =====
+  // The cloud copy of the inventory used to be restored ONLY when its timestamp
+  // looked newer than the one this browser had already "applied". If the device
+  // copy was incomplete (e.g. the From-To list survived but LM/Incoming did not)
+  // the timestamps matched, so the missing datasets were never downloaded.
+  // These helpers restore each MISSING dataset individually, regardless of
+  // timestamps, and save it to the device so a refresh / hub switch keeps it.
+  function localInventoryPresence() {
+    const fs = window.NOL3FileStore;
+    const rowsOf = t => { const r = fs?.get?.(t); return Array.isArray(r?.dataset?.rows) ? r.dataset.rows.length : 0; };
+    const u = fs?.get?.("unifiedInventory");
+    const ud = u && u.dataset;
+    return {
+      lm: rowsOf("lm") > 0 || !!(ud && Array.isArray(ud.lmRows) && ud.lmRows.length),
+      incoming: rowsOf("incoming") > 0 || !!(ud && Array.isArray(ud.incomingRows) && ud.incomingRows.length),
+      linehaul: rowsOf("linehaul") > 0
+    };
+  }
+
+  async function persistInventoryLocally(patch) {
+    const fs = window.NOL3FileStore;
+    if (!fs || typeof fs.put !== "function") return;
+    const mk = (type, inv) => ({
+      type,
+      files: (Array.isArray(inv.files) && inv.files.length ? inv.files : [{ name: inv.fileName || "inventory.csv" }])
+        .map(f => ({ name: (f && f.name) || inv.fileName || "inventory.csv", lastModified: (f && f.lastModified) || 0, text: "" })),
+      dataset: {
+        fileName: inv.fileName || "",
+        headers: Array.isArray(inv.headers) ? inv.headers : [],
+        rows: Array.isArray(inv.rows) ? inv.rows : [],
+        rawText: "",
+        loadedAt: inv.loadedAt || new Date().toISOString()
+      },
+      savedAt: new Date().toISOString()
+    });
+    if (patch.lmInventory) await fs.put(mk("lm", patch.lmInventory));
+    if (patch.incomingInventory) await fs.put(mk("incoming", patch.incomingInventory));
+    if (patch.lineHaulInventory) await fs.put(mk("linehaul", patch.lineHaulInventory));
+  }
+
+  async function restoreMissingInventoryFromCloud() {
+    if (!isSelectedHubCloudIdVerified() || !configured()) return false;
+    try { await window.NOL3FileStore?.ready?.(); } catch (_) {}
+    const present = localInventoryPresence();
+    if (present.lm && present.incoming && present.linehaul) return false;   // nothing missing
+    const ctx = HUB_CODE;
+    const remote = await readRemoteFor(filesChannel);
+    if (ctx !== HUB_CODE || !remote || !remote.data) return false;
+    const snap = remote.data;
+    const has = v => !!(v && ((Array.isArray(v.rows) && v.rows.length) || v.rawText));
+    const patch = {};
+    if (!present.lm && has(snap.lmInventory)) patch.lmInventory = snap.lmInventory;
+    if (!present.incoming && has(snap.incomingInventory)) patch.incomingInventory = snap.incomingInventory;
+    if (!present.linehaul && has(snap.lineHaulInventory)) patch.lineHaulInventory = snap.lineHaulInventory;
+    if (!Object.keys(patch).length) return false;
+    // These saves are restores, not new uploads: never push them back.
+    filesChannel.applyingUntil = Date.now() + 30000;
+    await filesChannel.applyRemote(patch);
+    await persistInventoryLocally(patch);
+    filesChannel.applyingUntil = Date.now() + 10000;
+    // The page-load runtime restore may have cleared memory in between; re-apply if so.
+    const stillMissing =
+      (patch.lmInventory && !(NOL3.lmInventory?.rows?.length)) ||
+      (patch.incomingInventory && !(NOL3.incomingInventory?.rows?.length)) ||
+      (patch.lineHaulInventory && !(NOL3.lineHaulInventory?.rows?.length));
+    if (stillMissing) await filesChannel.applyRemote(patch);
+    console.info("NOL3: restored missing inventory from cloud:", Object.keys(patch).join(", "));
+    return true;
+  }
+  // ===== /INVENTORY RECOVERY FROM CLOUD =====
+
   async function initialSyncChannelImpl(channel) {
     if (!isSelectedHubCloudIdVerified()) {
       channel.initialized = true;
@@ -14279,6 +14362,10 @@ NOL3.pages.riders = function (root) {
       channel.lastStamp = 0;
       console.info(`NOL3 startup: ${HUB_NAME} is local-only until its production hub ID is verified`);
       return false;
+    }
+    if (channel === filesChannel) {
+      try { await restoreMissingInventoryFromCloud(); }
+      catch (e) { console.warn("NOL3 cloud: missing-inventory recovery failed", e); }
     }
     let startupStamp = 0;
     try {
@@ -14289,11 +14376,13 @@ NOL3.pages.riders = function (root) {
     }
 
     const savedRemoteTime = Number(localStorage.getItem(channel.metaKey) || 0);
+    const savedStamp = readSavedStamp(channel);
+    const stampAlreadySeen = !!(startupStamp && (startupStamp <= savedRemoteTime || startupStamp <= savedStamp));
     channel.lastStamp = startupStamp;
 
     // Operational files are local-only. Keep their fast-path untouched so a
     // page refresh does not rebuild/hash large datasets unnecessarily.
-    if (channel === filesChannel && startupStamp && startupStamp <= savedRemoteTime) {
+    if (channel === filesChannel && stampAlreadySeen) {
       const hasLocalFiles = !!(
         (Array.isArray(window.NOL3?.lmInventory?.rows) && window.NOL3.lmInventory.rows.length) ||
         (Array.isArray(window.NOL3?.incomingInventory?.rows) && window.NOL3.incomingInventory.rows.length) ||
@@ -14325,7 +14414,7 @@ NOL3.pages.riders = function (root) {
     // The dirty marker is the only local signal that a user made a newer change
     // which should win over the cloud copy.
     const needsRemoteRead = channel === settingsChannel || channel === rosterChannel ||
-      !startupStamp || startupStamp > savedRemoteTime || !savedRemoteTime;
+      !startupStamp || !stampAlreadySeen || !savedRemoteTime;
     let remote = null;
     const startupCtx = HUB_CODE;
     if (needsRemoteRead) remote = await readRemoteFor(channel);
@@ -14358,6 +14447,7 @@ NOL3.pages.riders = function (root) {
     }
 
     const remoteSnapshot = remote.data;
+    rememberStamp(channel, startupStamp);
     const remoteTime = Number(remoteSnapshot?.clientUpdatedAt || Date.parse(remote.updated_at || 0) || 0);
 
     const localHasData = channel === settingsChannel
@@ -14461,6 +14551,7 @@ NOL3.pages.riders = function (root) {
           local.clientUpdatedAt = channel.lastLocalMutationAt;
           if (channel === filesChannel) channel.lastRemoteClearedByUser = false;
           await pushSnapshotFor(channel, local);
+          rememberStamp(channel, channel.lastStamp);
           channel.lastRemoteUpdatedAt = channel.lastLocalMutationAt;
           channel.lastHash = startupFingerprint(channel, local);
           try { localStorage.setItem(channel.metaKey, String(channel.lastLocalMutationAt)); } catch (_) {}
@@ -14492,10 +14583,12 @@ NOL3.pages.riders = function (root) {
           // just to remember that this snapshot is now current.
           channel.lastHash = startupFingerprint(channel, remote.data);
           channel.lastStamp = remoteStamp;
+          rememberStamp(channel, remoteStamp);
           return true;
         }
       }
       channel.lastStamp = remoteStamp;
+      rememberStamp(channel, remoteStamp);
       return false;
     } finally {
       channel.syncing = false;
