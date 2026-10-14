@@ -6361,13 +6361,12 @@ NOL3.pages.planning = function (root) {
       const zoneIndex = findZoneIdColumn(lm.headers);
       if (townIndex < 0 || zoneIndex < 0) return result;
       const exceptionSet = getPlanningExceptionSet();
-      const zoneData = getZoneSettingsTownData(town);
-      const assignments = zoneData?.assignments && typeof zoneData.assignments === 'object' ? zoneData.assignments : {};
+      const assignedZones = getOperationalAssignedZones(town, area);
       lm.filteredRows.forEach(row => {
         if (rowMatchesPlanningException(row, lm.headers, exceptionSet)) return;
-        if (parseTownValue(row[townIndex]) !== town) return;
+        if (resolveRowTown(row, townIndex, zoneIndex) !== town) return;
         const zone = String(row[zoneIndex] ?? '').replace(/^\uFEFF/, '').trim() || 'No Zone ID';
-        if (String(assignments[zone] || '') !== area) return;
+        if (!assignedZones.has(zone)) return;
         result.set(zone, (result.get(zone) || 0) + 1);
       });
       return result;
@@ -6913,6 +6912,23 @@ NOL3.pages.planning = function (root) {
         key: makeOperationalTownKey(town, area), town, area: String(area)
       }));
     };
+    // Zone IDs that make up an operational piece (town + area).
+    // 1) Normal Zone Settings split: every zone assigned to that area.
+    // 2) A zone-scoped piece (dragged from the By Zone list) uses the Zone ID itself as the
+    //    "area". If Zone Settings has no assignment for it (never saved, or overwritten by a
+    //    sync), the piece still owns that one Zone ID instead of showing 0 orders.
+    const getOperationalAssignedZones = (town, area) => {
+      const zones = new Set();
+      const zoneData = getZoneSettingsTownData(town);
+      const assignments = zoneData?.assignments && typeof zoneData.assignments === 'object' ? zoneData.assignments : {};
+      const areaName = String(area || '');
+      Object.keys(assignments).forEach(zone => { if (String(assignments[zone]) === areaName) zones.add(String(zone).trim()); });
+      if (!zones.size && areaName) {
+        const owner = assignments[areaName];
+        if (!owner || String(owner) === areaName) zones.add(areaName.trim());
+      }
+      return zones;
+    };
     const getOperationalTownStats = (town, area) => {
       const result = { count: 0, incomingCount: 0, received: 0, delivering: 0, delivered: 0, hold: 0 };
       const lm = (typeof NOL3.getPlanningLMInventoryV10 === "function" ? NOL3.getPlanningLMInventoryV10() : NOL3.lmInventory);
@@ -6929,10 +6945,7 @@ NOL3.pages.planning = function (root) {
       const receivedIndex = businessMetrics?.receivedIndex ?? -1;
       const hasBusinessWindow = dueIds && receivedIndex >= 0;
       const exceptionSet = getPlanningExceptionSet();
-      const assignedZones = new Set();
-      const zoneData = getZoneSettingsTownData(town);
-      const assignments = zoneData?.assignments && typeof zoneData.assignments === 'object' ? zoneData.assignments : {};
-      Object.keys(assignments).forEach(zone => { if (String(assignments[zone]) === String(area)) assignedZones.add(String(zone).trim()); });
+      const assignedZones = getOperationalAssignedZones(town, area);
       lm.filteredRows.forEach((row, index) => {
         // Effective town (after any Zone reassignment) — never the raw native
         // town — so a zone moved to this town via reassignment is correctly
@@ -8016,8 +8029,14 @@ NOL3.pages.planning = function (root) {
         const entry = data[town] && typeof data[town] === 'object' ? data[town] : { areas: [], assignments: {} };
         entry.areas = Array.isArray(entry.areas) ? entry.areas : [];
         entry.assignments = entry.assignments && typeof entry.assignments === 'object' ? entry.assignments : {};
-        if (entry.areas.some(a => String(a) === zone)) { data[town] = entry; return; }          // already defined
         if (entry.assignments[zone] && String(entry.assignments[zone]) !== zone) return;        // zone already split elsewhere
+        if (entry.areas.some(a => String(a) === zone)) {
+          // already defined as an area: make sure the Zone ID is actually assigned to it
+          const owned = Object.values(entry.assignments).some(a => String(a) === zone);
+          if (!owned) { entry.assignments[zone] = zone; changed = true; }
+          data[town] = entry;
+          return;
+        }
         entry.areas.push(zone);
         entry.assignments[zone] = zone;
         data[town] = entry;
@@ -8801,6 +8820,23 @@ NOL3.pages.planning = function (root) {
           if (repaired.length) lmRepair.filteredRows = repaired;
         }
       } catch (_) {}
+      try {
+        const placedPieceKeys = [];
+        (NOL3.deliveryAreas || []).forEach(a => ensureAreaGroups(a).forEach(g => g.towns.forEach(t => { if (parseOperationalTownKey(t)) placedPieceKeys.push(t); })));
+        const healLm = NOL3.lmInventory;
+        if (placedPieceKeys.length && healLm?.filteredRows?.length && Array.isArray(healLm.headers)) {
+          const hz = findZoneIdColumn(healLm.headers), ht = findTownColumn(healLm.headers);
+          if (hz >= 0 && ht >= 0) {
+            // only restore pieces whose Zone ID really exists in this town's inventory
+            const known = new Set();
+            healLm.filteredRows.forEach(row => known.add(resolveRowTown(row, ht, hz) + '\u0001' + String(row[hz] ?? '').replace(/^\uFEFF/, '').trim()));
+            const healKeys = placedPieceKeys.filter(k => { const p = parseOperationalTownKey(k); return p && known.has(p.town + '\u0001' + String(p.area).trim()); });
+            if (healKeys.length && materializeZonePieceKeys(healKeys)) {
+              setTimeout(() => { try { notifyZoneSettingsChanged(); } catch (_) {} }, 0);
+            }
+          }
+        }
+      } catch (_) {}
       if (!groupsRoot) return;
       groupsRoot.innerHTML = '';
 
@@ -9079,8 +9115,6 @@ NOL3.pages.planning = function (root) {
                     <div class="town-group-rider-menu" role="menu"></div>
                   </div>
                   <div class="town-group-metrics">
-                    <span class="town-group-fp" title="Fleet Productivity">FP —</span>
-  <span class="town-group-sr" data-area-id="${area.id}" data-group-id="${group.id}" title="Group Success Rate">SR ${formatSuccessRate(getTownGroupUniqueStatus(group))}%</span>
                     <span class="town-group-total" data-area-id="${area.id}" data-group-id="${group.id}" title="${getTownGroupUniqueVolume(group).toLocaleString()}">${getTownGroupUniqueVolume(group).toLocaleString()}</span>
                     <button class="town-group-delete" type="button" data-area-id="${area.id}" data-group-id="${group.id}" title="Delete town group" aria-label="Delete ${NOL3.escapeHTML(group.title)}">×</button>
                   </div>
@@ -9095,13 +9129,6 @@ NOL3.pages.planning = function (root) {
                         <div class="town-chip" draggable="true" data-town="${NOL3.escapeHTML(town)}" title="${NOL3.escapeHTML(operational.town)} — ${NOL3.escapeHTML(operational.area)}">
                           <button class="town-zone-toggle" type="button" aria-expanded="false" aria-label="Show Zone IDs for ${NOL3.escapeHTML(operational.town)} in ${NOL3.escapeHTML(operational.area)}">▸</button>
                           <span class="town-chip-name">${NOL3.escapeHTML(operational.town)}${isClusterAreaName(operational.area) ? '' : ` <span class="town-chip-area">· ${NOL3.escapeHTML(operational.area)}</span>`}</span>
-                          <span class="town-chip-statuses">
-                            <span class="town-status-badge received" title="Received">R ${m.received.toLocaleString()}</span>
-                            <span class="town-status-badge delivering" title="Delivering">D ${m.delivering.toLocaleString()}</span>
-                            <span class="town-status-badge delivered" title="Delivered">DV ${m.delivered.toLocaleString()}</span>
-                            <span class="town-status-badge hold" title="On Hold">H ${m.hold.toLocaleString()}</span>
-                            <span class="town-status-badge success-rate" title="Success Rate">SR ${formatSuccessRate(m)}%</span>
-                          </span>
                           <span class="town-chip-count">${m.count.toLocaleString()}</span>
                         </div>`;
                     }
@@ -9120,13 +9147,6 @@ NOL3.pages.planning = function (root) {
                         <div class="town-chip town-chip-split-parent" draggable="true" data-town="${NOL3.escapeHTML(town)}" title="${NOL3.escapeHTML(town)}">
                           <button class="town-zone-toggle" type="button" aria-expanded="false" aria-label="Show Zone IDs for ${NOL3.escapeHTML(town)}">▸</button>
                           <span class="town-chip-name">${NOL3.escapeHTML(town)}</span>
-                          <span class="town-chip-statuses">
-                            <span class="town-status-badge received" title="Received">R ${splitMetrics.received.toLocaleString()}</span>
-                            <span class="town-status-badge delivering" title="Delivering">D ${splitMetrics.delivering.toLocaleString()}</span>
-                            <span class="town-status-badge delivered" title="Delivered">DV ${splitMetrics.delivered.toLocaleString()}</span>
-                            <span class="town-status-badge hold" title="On Hold">H ${splitMetrics.hold.toLocaleString()}</span>
-                            <span class="town-status-badge success-rate" title="Success Rate">SR ${formatSuccessRate(splitMetrics)}%</span>
-                          </span>
                           <span class="town-chip-count">${totalSplit.toLocaleString()}</span>
                         </div>`;
                     }
@@ -9135,13 +9155,6 @@ NOL3.pages.planning = function (root) {
                       <div class="town-chip" draggable="true" data-town="${NOL3.escapeHTML(town)}" title="${NOL3.escapeHTML(town)}">
                         <button class="town-zone-toggle" type="button" aria-expanded="false" aria-label="Show Zone IDs for ${NOL3.escapeHTML(town)}">▸</button>
                         <span class="town-chip-name">${NOL3.escapeHTML(town)}</span>
-                        <span class="town-chip-statuses">
-                          <span class="town-status-badge received" title="Received">R ${(pm.received || 0).toLocaleString()}</span>
-                          <span class="town-status-badge delivering" title="Delivering">D ${(pm.delivering || 0).toLocaleString()}</span>
-                          <span class="town-status-badge delivered" title="Delivered">DV ${(pm.delivered || 0).toLocaleString()}</span>
-                          <span class="town-status-badge hold" title="On Hold">H ${(pm.hold || 0).toLocaleString()}</span>
-                          <span class="town-status-badge success-rate" title="Success Rate">SR ${formatSuccessRate(pm)}%</span>
-                        </span>
                         <span class="town-chip-count">${(townCounts.get(town) || 0).toLocaleString()}</span>
                       </div>`;
                   }).join('') : '<div class="delivery-area-empty">Drag towns here</div>'}
@@ -15629,6 +15642,14 @@ NOL3.pages.riders = function (root) {
     #page-fleet-overview .fleet-overview-rider-head .fleet-overview-rider-summary .summary-value{font-size:15px;}
   }
 
+
+/* Delivery Areas: R/D/DV/H/SR and FP/SR badges removed -> let town + rider names use the space */
+.town-group-dropzone .town-chip{ flex-wrap:nowrap; row-gap:0; padding-bottom:7px; }
+.town-group-dropzone .town-chip .town-chip-name{ order:2; flex:1 1 auto; min-width:0; overflow:visible; text-overflow:clip; white-space:normal; overflow-wrap:anywhere; line-height:1.25; }
+.town-group-dropzone .town-chip .town-chip-count{ order:3; }
+.town-group-header{ flex-wrap:wrap; }
+.town-group-rider-picker{ flex:1 1 0; min-width:0; }
+.town-group-metrics{ margin-left:auto; }
 </style>
 
 <script id="fleet-overview-module">
