@@ -14468,7 +14468,9 @@ NOL3.pages.riders = function (root) {
 
     const savedRemoteTime = Number(localStorage.getItem(channel.metaKey) || 0);
     const savedStamp = readSavedStamp(channel);
-    const stampAlreadySeen = !!(startupStamp && (startupStamp <= savedRemoteTime || startupStamp <= savedStamp));
+    // Inventory compares cloud stamps with cloud stamps only; savedRemoteTime is this device's own
+    // clock (e.g. the moment of a CLEAR) and made a newer upload from another device look "already seen".
+    const stampAlreadySeen = !!(startupStamp && ((channel !== filesChannel && startupStamp <= savedRemoteTime) || startupStamp <= savedStamp));
     channel.lastStamp = startupStamp;
 
     // Operational files are local-only. Keep their fast-path untouched so a
@@ -14596,7 +14598,8 @@ NOL3.pages.riders = function (root) {
       return true;
     }
 
-    if (remoteTime > Math.max(savedRemoteTime, localDirtyAt, channel.lastLocalMutationAt || 0)) {
+    const filesStartupForeignWrite = channel === filesChannel && remoteHasData && !stampAlreadySeen && !localEditWins;
+    if (filesStartupForeignWrite || remoteTime > Math.max(savedRemoteTime, localDirtyAt, channel.lastLocalMutationAt || 0)) {
       await channel.applyRemote(remoteSnapshot);
       channel.lastRemoteUpdatedAt = remoteTime;
       channel.lastLocalMutationAt = remoteTime;
@@ -14665,7 +14668,12 @@ NOL3.pages.riders = function (root) {
       const remoteStamp = remote ? (Date.parse(remote.updated_at) || stamp) : stamp;
       if (remote?.data) {
         const remoteTime = Number(remote.data.clientUpdatedAt || new Date(remote.updated_at || 0).getTime() || 0);
-        if (remoteTime > channel.lastRemoteUpdatedAt && remoteTime > channel.lastLocalMutationAt) {
+        // Inventory: another device's clock can be a few minutes behind this one, which made a
+        // fresh upload look OLDER than this device's own CLEAR and get ignored. The cloud's
+        // own timestamp (remoteStamp) is what decides: a newer cloud write that is not ours
+        // (our own pushes already update channel.lastStamp) is always applied.
+        const foreignNewerFilesWrite = channel === filesChannel && remoteStamp > (channel.lastStamp || 0);
+        if ((remoteTime > channel.lastRemoteUpdatedAt && remoteTime > channel.lastLocalMutationAt) || foreignNewerFilesWrite) {
           await channel.applyRemote(remote.data);
           channel.lastRemoteUpdatedAt = remoteTime;
           channel.lastLocalMutationAt = remoteTime;
